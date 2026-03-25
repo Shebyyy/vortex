@@ -3489,10 +3489,10 @@ async def check_raidmode():
 # REMINDER SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
 
-FILE_REMINDERS = f"{DATA_ROOT}/reminders.json"
-FILE_SCHEDULED = f"{DATA_ROOT}/scheduled.json"
-FILE_CUSTOMCMDS = f"{DATA_ROOT}/customcmds.json"
-FILE_INVITES = f"{DATA_ROOT}/invites.json"
+FILE_REMINDERS = "reminders.json"
+FILE_SCHEDULED = "scheduled.json"
+FILE_CUSTOMCMDS = "customcmds.json"
+FILE_INVITES = "invites.json"
 
 async def get_reminders(session, guild_id: str = None) -> dict:
     all_r, _ = await gh_read(session, FILE_REMINDERS, guild_branch(interaction.guild))
@@ -4453,10 +4453,10 @@ async def check_scheduled_tasks():
 # AUTOROLE SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
 
-FILE_AUTOROLE = f"{DATA_ROOT}/autorole.json"
-FILE_STARBOARD = f"{DATA_ROOT}/starboard.json"
-FILE_STICKYROLES = f"{DATA_ROOT}/stickyroles.json"
-FILE_BIRTHDAYS = f"{DATA_ROOT}/birthdays.json"
+FILE_AUTOROLE = f"autorole.json"
+FILE_STARBOARD = f"starboard.json"
+FILE_STICKYROLES = f"stickyroles.json"
+FILE_BIRTHDAYS = f"birthdays.json"
 
 async def get_autorole(session, guild_id: str) -> dict:
     all_a, _ = await gh_read(session, FILE_AUTOROLE, guild_branch(interaction.guild))
@@ -4891,7 +4891,7 @@ async def transferwarns_cmd(interaction: discord.Interaction, from_user: discord
 # POLLS ENHANCED
 # ══════════════════════════════════════════════════════════════════════════════
 
-FILE_POLLS = f"{DATA_ROOT}/polls.json"
+FILE_POLLS = f"polls.json"
 
 async def get_polls(session, guild_id: str) -> dict:
     all_p, _ = await gh_read(session, FILE_POLLS, guild_branch(interaction.guild))
