@@ -21,27 +21,26 @@ GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
 PORT          = int(os.environ.get("PORT", 8080))
 
 GITHUB_OWNER  = "Shebyyy"
-GITHUB_REPO   = "AnymeX-Preview"
-GITHUB_BRANCH = "beta"
+GITHUB_REPO   = "vortex-db"
 GITHUB_API    = "https://api.github.com"
 
-# All data lives under this folder in the repo
-DATA_ROOT = "vortex"
+# Each guild gets its own branch: "{guild_id}-{guild_name}"
+# Files are flat JSON at root of each branch (no subfolders needed)
 
-# ── File paths ─────────────────────────────────────────────────────────────────
+# ── File names (same on every branch) ─────────────────────────────────────────
 
-FILE_CONFIG      = f"{DATA_ROOT}/config.json"       # per-guild settings
-FILE_WARNINGS    = f"{DATA_ROOT}/warnings.json"     # warnings per user per guild
-FILE_CASES       = f"{DATA_ROOT}/cases.json"        # mod case log
-FILE_HONEYPOT    = f"{DATA_ROOT}/honeypot.json"     # honeypot channels
-FILE_TICKETS     = f"{DATA_ROOT}/tickets.json"      # open tickets
-FILE_RXROLES     = f"{DATA_ROOT}/rxroles.json"      # reaction roles
-FILE_GIVEAWAYS   = f"{DATA_ROOT}/giveaways.json"    # active giveaways
-FILE_LEVELS      = f"{DATA_ROOT}/levels.json"       # XP per user per guild
-FILE_TEMPACTIONS = f"{DATA_ROOT}/tempactions.json"  # temp bans, mutes, locks
-FILE_RAIDMODE    = f"{DATA_ROOT}/raidmode.json"     # raid mode status
-FILE_MODROLES    = f"{DATA_ROOT}/modroles.json"     # mod/admin roles
-FILE_LOCKED      = f"{DATA_ROOT}/locked.json"       # locked channels
+FILE_CONFIG      = "config.json"
+FILE_WARNINGS    = "warnings.json"
+FILE_CASES       = "cases.json"
+FILE_HONEYPOT    = "honeypot.json"
+FILE_TICKETS     = "tickets.json"
+FILE_RXROLES     = "rxroles.json"
+FILE_GIVEAWAYS   = "giveaways.json"
+FILE_LEVELS      = "levels.json"
+FILE_TEMPACTIONS = "tempactions.json"
+FILE_RAIDMODE    = "raidmode.json"
+FILE_MODROLES    = "modroles.json"
+FILE_LOCKED      = "locked.json"
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
@@ -186,8 +185,52 @@ def gh_headers():
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-async def gh_read(session: aiohttp.ClientSession, filepath: str):
-    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{filepath}?ref={GITHUB_BRANCH}"
+# ── Branch management ──────────────────────────────────────────────────────────
+
+def guild_branch(guild: discord.Guild) -> str:
+    """Return the branch name for a guild: {id}-{sanitized-name}"""
+    safe_name = re.sub(r"[^a-zA-Z0-9\-]", "-", guild.name).strip("-").lower()
+    safe_name = re.sub(r"-+", "-", safe_name)[:40]
+    return f"{guild.id}-{safe_name}"
+
+async def ensure_guild_branch(session: aiohttp.ClientSession, branch: str):
+    """Create the guild branch from main if it doesn't exist yet."""
+    # Check if branch exists
+    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/branches/{branch}"
+    async with session.get(url, headers=gh_headers()) as r:
+        if r.status == 200:
+            return  # Already exists
+
+    # Get SHA of main branch to branch from
+    async with session.get(
+        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/git/refs/heads/main",
+        headers=gh_headers()
+    ) as r:
+        if r.status != 200:
+            # Try master if main doesn't exist
+            async with session.get(
+                f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/git/refs/heads/master",
+                headers=gh_headers()
+            ) as r2:
+                if r2.status != 200:
+                    return
+                data = await r2.json()
+        else:
+            data = await r.json()
+    sha = data["object"]["sha"]
+
+    # Create the branch
+    payload = {"ref": f"refs/heads/{branch}", "sha": sha}
+    async with session.post(
+        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/git/refs",
+        headers=gh_headers(),
+        json=payload
+    ) as r:
+        if r.status in (200, 201):
+            print(f"✅ Created branch: {branch}")
+
+async def gh_read(session: aiohttp.ClientSession, filepath: str, branch: str):
+    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{filepath}?ref={branch}"
     async with session.get(url, headers=gh_headers()) as r:
         if r.status == 404:
             return None, None
@@ -195,11 +238,11 @@ async def gh_read(session: aiohttp.ClientSession, filepath: str):
         content = base64.b64decode(data["content"]).decode("utf-8")
         return json.loads(content), data["sha"]
 
-async def gh_write(session: aiohttp.ClientSession, filepath: str, data, sha, msg: str):
+async def gh_write(session: aiohttp.ClientSession, filepath: str, data, sha, msg: str, branch: str):
     payload = {
         "message": msg,
         "content": base64.b64encode(json.dumps(data, indent=2, ensure_ascii=False).encode()).decode(),
-        "branch": GITHUB_BRANCH,
+        "branch": branch,
     }
     if sha:
         payload["sha"] = sha
@@ -207,51 +250,45 @@ async def gh_write(session: aiohttp.ClientSession, filepath: str, data, sha, msg
     async with session.put(url, headers=gh_headers(), json=payload) as r:
         return r.status in (200, 201)
 
-# ── Config helpers ─────────────────────────────────────────────────────────────
+# ── Per-guild data helpers ─────────────────────────────────────────────────────
+# Each guild has its own branch. Files are flat JSON (no guild_id key needed).
 
-async def get_config(session, guild_id: str) -> dict:
-    all_cfg, _ = await gh_read(session, FILE_CONFIG)
-    if not all_cfg:
+async def get_config(session, guild: discord.Guild) -> dict:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_CONFIG, branch)
+    if not data:
         return DEFAULT_CONFIG.copy()
     cfg = DEFAULT_CONFIG.copy()
-    cfg.update(all_cfg.get(guild_id, {}))
+    cfg.update(data)
     return cfg
 
-async def save_config(session, guild_id: str, cfg: dict):
-    all_cfg, sha = await gh_read(session, FILE_CONFIG)
-    if not all_cfg:
-        all_cfg = {}
-    all_cfg[guild_id] = cfg
-    await gh_write(session, FILE_CONFIG, all_cfg, sha, f"Vortex: update config for {guild_id}")
+async def save_config(session, guild: discord.Guild, cfg: dict):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_CONFIG, branch)
+    await gh_write(session, FILE_CONFIG, cfg, sha, f"Vortex: update config", branch, guild_branch(interaction.guild))
 
-async def get_warnings(session, guild_id: str) -> dict:
-    all_w, _ = await gh_read(session, FILE_WARNINGS)
-    if not all_w:
-        return {}
-    return all_w.get(guild_id, {})
+async def get_warnings(session, guild: discord.Guild) -> dict:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_WARNINGS, branch)
+    return data or {}
 
-async def save_warnings(session, guild_id: str, warnings: dict):
-    all_w, sha = await gh_read(session, FILE_WARNINGS)
-    if not all_w:
-        all_w = {}
-    all_w[guild_id] = warnings
-    await gh_write(session, FILE_WARNINGS, all_w, sha, f"Vortex: update warnings for {guild_id}")
+async def save_warnings(session, guild: discord.Guild, warnings: dict):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_WARNINGS, branch)
+    await gh_write(session, FILE_WARNINGS, warnings, sha, "Vortex: update warnings", branch, guild_branch(interaction.guild))
 
-async def get_cases(session, guild_id: str) -> list:
-    all_c, _ = await gh_read(session, FILE_CASES)
-    if not all_c:
-        return []
-    return all_c.get(guild_id, [])
+async def get_cases(session, guild: discord.Guild) -> list:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_CASES, branch)
+    return data or []
 
-async def save_cases(session, guild_id: str, cases: list):
-    all_c, sha = await gh_read(session, FILE_CASES)
-    if not all_c:
-        all_c = {}
-    all_c[guild_id] = cases
-    await gh_write(session, FILE_CASES, all_c, sha, f"Vortex: update cases for {guild_id}")
+async def save_cases(session, guild: discord.Guild, cases: list):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_CASES, branch)
+    await gh_write(session, FILE_CASES, cases, sha, "Vortex: update cases", branch, guild_branch(interaction.guild))
 
-async def add_case(session, guild_id: str, action: str, mod: discord.Member, target, reason: str, duration: str = None) -> int:
-    cases = await get_cases(session, guild_id)
+async def add_case(session, guild: discord.Guild, action: str, mod: discord.Member, target, reason: str, duration: str = None) -> int:
+    cases = await get_cases(session, guild)
     case_id = len(cases) + 1
     case_data = {
         "id": case_id,
@@ -267,55 +304,48 @@ async def add_case(session, guild_id: str, action: str, mod: discord.Member, tar
     if duration:
         case_data["duration"] = duration
     cases.append(case_data)
-    await save_cases(session, guild_id, cases)
+    await save_cases(session, guild, cases)
     return case_id
 
-async def get_levels(session, guild_id: str) -> dict:
-    all_l, _ = await gh_read(session, FILE_LEVELS)
-    if not all_l:
-        return {}
-    return all_l.get(guild_id, {})
+async def get_levels(session, guild: discord.Guild) -> dict:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_LEVELS, branch)
+    return data or {}
 
-async def save_levels(session, guild_id: str, levels: dict):
-    all_l, sha = await gh_read(session, FILE_LEVELS)
-    if not all_l:
-        all_l = {}
-    all_l[guild_id] = levels
-    await gh_write(session, FILE_LEVELS, all_l, sha, f"Vortex: update levels for {guild_id}")
+async def save_levels(session, guild: discord.Guild, levels: dict):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_LEVELS, branch)
+    await gh_write(session, FILE_LEVELS, levels, sha, "Vortex: update levels", branch, guild_branch(interaction.guild))
 
-async def get_temp_actions(session) -> dict:
-    all_t, _ = await gh_read(session, FILE_TEMPACTIONS)
-    return all_t or {}
+async def get_temp_actions(session, guild: discord.Guild) -> dict:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_TEMPACTIONS, branch)
+    return data or {}
 
-async def save_temp_actions(session, data: dict):
-    sha = (await gh_read(session, FILE_TEMPACTIONS))[1] if await gh_read(session, FILE_TEMPACTIONS)[0] else None
-    await gh_write(session, FILE_TEMPACTIONS, data, sha, "Vortex: update temp actions")
+async def save_temp_actions(session, guild: discord.Guild, data: dict):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_TEMPACTIONS, branch)
+    await gh_write(session, FILE_TEMPACTIONS, data, sha, "Vortex: update temp actions", branch, guild_branch(interaction.guild))
 
-async def get_mod_roles(session, guild_id: str) -> dict:
-    all_r, _ = await gh_read(session, FILE_MODROLES)
-    if not all_r:
-        return {"mod_roles": [], "admin_roles": []}
-    return all_r.get(guild_id, {"mod_roles": [], "admin_roles": []})
+async def get_mod_roles(session, guild: discord.Guild) -> dict:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_MODROLES, branch)
+    return data or {"mod_roles": [], "admin_roles": []}
 
-async def save_mod_roles(session, guild_id: str, data: dict):
-    all_r, sha = await gh_read(session, FILE_MODROLES)
-    if not all_r:
-        all_r = {}
-    all_r[guild_id] = data
-    await gh_write(session, FILE_MODROLES, all_r, sha, f"Vortex: update mod roles for {guild_id}")
+async def save_mod_roles(session, guild: discord.Guild, data: dict):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_MODROLES, branch)
+    await gh_write(session, FILE_MODROLES, data, sha, "Vortex: update mod roles", branch, guild_branch(interaction.guild))
 
-async def get_locked_channels(session, guild_id: str) -> dict:
-    all_l, _ = await gh_read(session, FILE_LOCKED)
-    if not all_l:
-        return {}
-    return all_l.get(guild_id, {})
+async def get_locked_channels(session, guild: discord.Guild) -> dict:
+    branch = guild_branch(guild)
+    data, _ = await gh_read(session, FILE_LOCKED, branch)
+    return data or {}
 
-async def save_locked_channels(session, guild_id: str, data: dict):
-    all_l, sha = await gh_read(session, FILE_LOCKED)
-    if not all_l:
-        all_l = {}
-    all_l[guild_id] = data
-    await gh_write(session, FILE_LOCKED, all_l, sha, f"Vortex: update locked channels for {guild_id}")
+async def save_locked_channels(session, guild: discord.Guild, data: dict):
+    branch = guild_branch(guild)
+    _, sha = await gh_read(session, FILE_LOCKED, branch)
+    await gh_write(session, FILE_LOCKED, data, sha, "Vortex: update locked channels", branch, guild_branch(interaction.guild))
 
 # ── Mod log helper ─────────────────────────────────────────────────────────────
 
@@ -346,9 +376,8 @@ def is_mod():
             return True
         if interaction.user.guild_permissions.moderate_members:
             return True
-        # Check custom mod roles
         async with aiohttp.ClientSession() as session:
-            mod_data = await get_mod_roles(session, str(interaction.guild_id))
+            mod_data = await get_mod_roles(session, interaction.guild)
         user_role_ids = [r.id for r in interaction.user.roles]
         if any(int(rid) in user_role_ids for rid in mod_data.get("mod_roles", [])):
             return True
@@ -359,9 +388,8 @@ def is_admin():
     async def predicate(interaction: discord.Interaction):
         if interaction.user.guild_permissions.administrator:
             return True
-        # Check custom admin roles
         async with aiohttp.ClientSession() as session:
-            mod_data = await get_mod_roles(session, str(interaction.guild_id))
+            mod_data = await get_mod_roles(session, interaction.guild)
         user_role_ids = [r.id for r in interaction.user.roles]
         if any(int(rid) in user_role_ids for rid in mod_data.get("admin_roles", [])):
             return True
@@ -398,32 +426,45 @@ bot = commands.Bot(command_prefix="v!", intents=intents, help_command=None)
 
 # ── Ensure data files exist ────────────────────────────────────────────────────
 
+async def ensure_guild_files(session: aiohttp.ClientSession, guild: discord.Guild):
+    """Ensure all JSON files exist on the guild's branch."""
+    branch = guild_branch(guild)
+    await ensure_guild_branch(session, branch)
+    for filepath, default in [
+        (FILE_CONFIG,      DEFAULT_CONFIG),
+        (FILE_WARNINGS,    {}),
+        (FILE_CASES,       []),
+        (FILE_HONEYPOT,    {}),
+        (FILE_TICKETS,     {}),
+        (FILE_RXROLES,     {}),
+        (FILE_GIVEAWAYS,   []),
+        (FILE_LEVELS,      {}),
+        (FILE_TEMPACTIONS, {}),
+        (FILE_RAIDMODE,    {}),
+        (FILE_MODROLES,    {"mod_roles": [], "admin_roles": []}),
+        (FILE_LOCKED,      {}),
+    ]:
+        data, sha = await gh_read(session, filepath, branch)
+        if sha is None:
+            await gh_write(session, filepath, default, None, f"Vortex: init {filepath}", branch)
+
 async def ensure_files():
+    """Called on ready - init branches for all current guilds."""
     async with aiohttp.ClientSession() as session:
-        for filepath, default in [
-            (FILE_CONFIG,      {}),
-            (FILE_WARNINGS,    {}),
-            (FILE_CASES,       {}),
-            (FILE_HONEYPOT,    {}),
-            (FILE_TICKETS,     {}),
-            (FILE_RXROLES,     {}),
-            (FILE_GIVEAWAYS,   {}),
-            (FILE_LEVELS,      {}),
-            (FILE_TEMPACTIONS, {}),
-            (FILE_RAIDMODE,    {}),
-            (FILE_MODROLES,    {}),
-            (FILE_LOCKED,      {}),
-        ]:
-            data, sha = await gh_read(session, filepath)
-            if sha is None:
-                await gh_write(session, filepath, default, None, f"Vortex: init {filepath}")
-                print(f"✅ Created {filepath}")
-            else:
-                print(f"✅ {filepath} exists")
+        for guild in bot.guilds:
+            print(f"✅ Setting up branch for: {guild.name} ({guild.id})")
+            await ensure_guild_files(session, guild)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EVENTS
 # ══════════════════════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Auto-init branch when bot joins a new server."""
+    async with aiohttp.ClientSession() as session:
+        await ensure_guild_files(session, guild)
+    print(f"✅ Joined and initialized: {guild.name} ({guild.id})")
 
 @bot.event
 async def on_ready():
@@ -448,7 +489,7 @@ async def on_ready():
 async def on_member_join(member: discord.Member):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         
         # Raid detection
         raid_mode = cfg.get("raid_mode", False)
@@ -501,7 +542,7 @@ async def on_member_join(member: discord.Member):
 async def on_member_remove(member: discord.Member):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     if cfg.get("logging", {}).get("member_leave") and cfg.get("mod_log"):
         e = discord.Embed(title="🔴 Member left", color=0xED4245, timestamp=datetime.datetime.utcnow())
         e.set_thumbnail(url=member.display_avatar.url)
@@ -531,7 +572,7 @@ async def on_message_delete(message: discord.Message):
         _ghost_pings[guild_id].append(ghost_ping_data)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     if cfg.get("logging", {}).get("message_delete") and cfg.get("mod_log"):
         e = discord.Embed(title="🗑️ Message deleted", color=0xFEE75C, timestamp=datetime.datetime.utcnow())
         e.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=True)
@@ -549,7 +590,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         return
     guild_id = str(before.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     if cfg.get("logging", {}).get("message_edit") and cfg.get("mod_log"):
         e = discord.Embed(title="✏️ Message edited", color=0x5865F2, timestamp=datetime.datetime.utcnow())
         e.add_field(name="Author", value=f"{before.author} ({before.author.id})", inline=True)
@@ -563,7 +604,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 async def on_voice_state_update(member: discord.Member, before, after):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     if not cfg.get("logging", {}).get("voice") or not cfg.get("mod_log"):
         return
     if before.channel == after.channel:
@@ -588,7 +629,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         return
     guild_id = str(before.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     
     # Role change logging
     if before.roles != after.roles and cfg.get("logging", {}).get("role_change") and cfg.get("mod_log"):
@@ -626,7 +667,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
     guild_id = str(payload.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_rx, _ = await gh_read(session, FILE_RXROLES)
+        all_rx, _ = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
     if not all_rx:
         return
     guild_rx = all_rx.get(guild_id, {})
@@ -647,7 +688,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         return
     guild_id = str(payload.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_rx, _ = await gh_read(session, FILE_RXROLES)
+        all_rx, _ = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
     if not all_rx:
         return
     guild_rx = all_rx.get(guild_id, {})
@@ -673,13 +714,13 @@ async def on_message(message: discord.Message):
     content  = message.content
 
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
 
     am = cfg.get("automod", DEFAULT_CONFIG["automod"])
 
     # ── Honeypot check ─────────────────────────────────────────────────────────
     async with aiohttp.ClientSession() as session:
-        all_hp, _ = await gh_read(session, FILE_HONEYPOT)
+        all_hp, _ = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
     if all_hp:
         guild_hp = all_hp.get(guild_id, {})
         if str(message.channel.id) in guild_hp:
@@ -715,7 +756,7 @@ async def on_message(message: discord.Message):
 
     # ── XP / leveling ──────────────────────────────────────────────────────────
     async with aiohttp.ClientSession() as session:
-        levels = await get_levels(session, guild_id)
+        levels = await get_levels(session, guild)
         uid = str(user.id)
         entry = levels.get(uid, {"xp": 0, "level": 0, "last_msg": 0})
         now = time.time()
@@ -730,7 +771,7 @@ async def on_message(message: discord.Message):
                     f"🎉 {user.mention} reached **level {entry['level']}**!", delete_after=10
                 )
             levels[uid] = entry
-            await save_levels(session, guild_id, levels)
+            await save_levels(session, guild, levels)
 
     async def automod_action(action: str, reason: str):
         try:
@@ -843,8 +884,8 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
     await member.ban(reason=reason, delete_message_days=delete_days)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "ban", interaction.user, member, reason)
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "ban", interaction.user, member, reason)
     
     e = mod_embed(0xED4245, "Member banned", [
         ("User", f"{member} ({member.id})", True),
@@ -881,8 +922,8 @@ async def hackban(interaction: discord.Interaction, user_id: str, reason: str = 
         await interaction.guild.ban(user, reason=reason, delete_message_days=delete_days)
         
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, str(interaction.guild_id))
-            case_id = await add_case(session, str(interaction.guild_id), "hackban", interaction.user, user, reason)
+            cfg = await get_config(session, interaction.guild)
+            case_id = await add_case(session, interaction.guild, "hackban", interaction.user, user, reason)
         
         e = mod_embed(0xED4245, "User hackbanned", [
             ("User", f"{user} ({user.id})", True),
@@ -921,8 +962,8 @@ async def softban(interaction: discord.Interaction, member: discord.Member, reas
     await member.unban(reason="Softban - auto unban")
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "softban", interaction.user, member, reason)
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "softban", interaction.user, member, reason)
     
     e = mod_embed(0xFEE75C, "Member softbanned", [
         ("User", f"{member} ({member.id})", True),
@@ -958,8 +999,8 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, dura
     await member.ban(reason=f"Tempban: {reason}")
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "tempban", interaction.user, member, reason, duration)
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "tempban", interaction.user, member, reason, duration)
         
         # Store temp action
         temp_data = await get_temp_actions(session)
@@ -1001,7 +1042,7 @@ async def massban(interaction: discord.Interaction, users: str, reason: str = "M
     failed = 0
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
+        cfg = await get_config(session, interaction.guild)
         
         for uid in user_ids[:20]:  # Limit to 20 at once
             try:
@@ -1019,7 +1060,7 @@ async def massban(interaction: discord.Interaction, users: str, reason: str = "M
                 failed += 1
         
         if banned > 0:
-            case_id = await add_case(session, str(interaction.guild_id), "massban", interaction.user, 
+            case_id = await add_case(session, interaction.guild, "massban", interaction.user, 
                                     type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{banned} users"})(), 
                                     reason)
     
@@ -1035,8 +1076,8 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "N
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user, reason=reason)
         async with aiohttp.ClientSession() as session:
-            cfg  = await get_config(session, str(interaction.guild_id))
-            case_id = await add_case(session, str(interaction.guild_id), "unban", interaction.user, user, reason)
+            cfg  = await get_config(session, interaction.guild)
+            case_id = await add_case(session, interaction.guild, "unban", interaction.user, user, reason)
         e = mod_embed(0x57F287, "Member unbanned", [
             ("User", f"{user} ({user.id})", True),
             ("Mod",  f"{interaction.user}", True),
@@ -1113,8 +1154,8 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
     await member.kick(reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg     = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "kick", interaction.user, member, reason)
+        cfg     = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "kick", interaction.user, member, reason)
     
     e = mod_embed(0xFEE75C, "Member kicked", [
         ("User", f"{member} ({member.id})", True),
@@ -1140,7 +1181,7 @@ async def masskick(interaction: discord.Interaction, users: str, reason: str = "
     failed = 0
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
+        cfg = await get_config(session, interaction.guild)
         
         for uid in user_ids[:20]:
             try:
@@ -1154,7 +1195,7 @@ async def masskick(interaction: discord.Interaction, users: str, reason: str = "
                 failed += 1
         
         if kicked > 0:
-            case_id = await add_case(session, str(interaction.guild_id), "masskick", interaction.user,
+            case_id = await add_case(session, interaction.guild, "masskick", interaction.user,
                                     type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{kicked} users"})(),
                                     reason)
     
@@ -1189,8 +1230,8 @@ async def mute(interaction: discord.Interaction, member: discord.Member, duratio
     await member.timeout(until, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg     = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "mute", interaction.user, member, reason, duration)
+        cfg     = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "mute", interaction.user, member, reason, duration)
     
     e = mod_embed(0x9B59B6, "Member muted", [
         ("User",     f"{member} ({member.id})", True),
@@ -1209,8 +1250,8 @@ async def unmute(interaction: discord.Interaction, member: discord.Member, reaso
     await interaction.response.defer(ephemeral=True)
     await member.timeout(None, reason=reason)
     async with aiohttp.ClientSession() as session:
-        cfg     = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "unmute", interaction.user, member, reason)
+        cfg     = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "unmute", interaction.user, member, reason)
     e = mod_embed(0x57F287, "Member unmuted", [
         ("User", f"{member} ({member.id})", True),
         ("Mod",  f"{interaction.user}", True),
@@ -1242,8 +1283,8 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg      = await get_config(session, guild_id)
-        warnings = await get_warnings(session, guild_id)
+        cfg      = await get_config(session, guild)
+        warnings = await get_warnings(session, guild)
         uid      = str(member.id)
         if uid not in warnings:
             warnings[uid] = []
@@ -1256,8 +1297,8 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
             "points": points,
         }
         warnings[uid].append(warn_data)
-        await save_warnings(session, guild_id, warnings)
-        case_id = await add_case(session, guild_id, "warn", interaction.user, member, reason)
+        await save_warnings(session, guild, warnings)
+        case_id = await add_case(session, guild, "warn", interaction.user, member, reason)
     
     total_points = sum(w.get("points", 1) for w in warnings[uid])
     count = len(warnings[uid])
@@ -1301,7 +1342,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 async def warnings(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer(ephemeral=True)
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, str(interaction.guild_id))
+        warns = await get_warnings(session, interaction.guild)
     user_warns = warns.get(str(member.id), [])
     
     total_points = sum(w.get("points", 1) for w in user_warns)
@@ -1327,7 +1368,7 @@ async def delwarn(interaction: discord.Interaction, member: discord.Member, warn
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, guild_id)
+        warns = await get_warnings(session, guild)
         user_warns = warns.get(str(member.id), [])
         
         if warn_number < 1 or warn_number > len(user_warns):
@@ -1336,7 +1377,7 @@ async def delwarn(interaction: discord.Interaction, member: discord.Member, warn
         
         removed = user_warns.pop(warn_number - 1)
         warns[str(member.id)] = user_warns
-        await save_warnings(session, guild_id, warns)
+        await save_warnings(session, guild, warns)
     
     await interaction.followup.send(f"✅ Removed warning #{warn_number} from **{member}**\nReason was: {removed['reason']}", ephemeral=True)
 
@@ -1348,9 +1389,9 @@ async def clearwarnings(interaction: discord.Interaction, member: discord.Member
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, guild_id)
+        warns = await get_warnings(session, guild)
         warns[str(member.id)] = []
-        await save_warnings(session, guild_id, warns)
+        await save_warnings(session, guild, warns)
     await interaction.followup.send(f"✅ Cleared all warnings for **{member}**", ephemeral=True)
 
 
@@ -1362,7 +1403,7 @@ async def editwarn(interaction: discord.Interaction, member: discord.Member, war
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, guild_id)
+        warns = await get_warnings(session, guild)
         user_warns = warns.get(str(member.id), [])
         
         if warn_number < 1 or warn_number > len(user_warns):
@@ -1371,7 +1412,7 @@ async def editwarn(interaction: discord.Interaction, member: discord.Member, war
         
         user_warns[warn_number - 1]["reason"] = new_reason
         warns[str(member.id)] = user_warns
-        await save_warnings(session, guild_id, warns)
+        await save_warnings(session, guild, warns)
     
     await interaction.followup.send(f"✅ Updated warning #{warn_number} for **{member}**\nNew reason: {new_reason}", ephemeral=True)
 
@@ -1423,13 +1464,13 @@ async def lock(interaction: discord.Interaction, channel: discord.abc.GuildChann
     await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
-        case_id = await add_case(session, guild_id, "lock", interaction.user, 
+        cfg = await get_config(session, guild)
+        case_id = await add_case(session, guild, "lock", interaction.user, 
                                 type('Obj', (object,), {'id': channel.id, '__str__': lambda s: f"#{channel.name}"})(), reason)
         
-        locked = await get_locked_channels(session, guild_id)
+        locked = await get_locked_channels(session, guild)
         locked[str(channel.id)] = {"channel_name": channel.name, "reason": reason, "timestamp": datetime.datetime.utcnow().isoformat()}
-        await save_locked_channels(session, guild_id, locked)
+        await save_locked_channels(session, guild, locked)
     
     e = mod_embed(0xED4245, "Channel locked", [
         ("Channel", channel.mention, True),
@@ -1458,13 +1499,13 @@ async def unlock(interaction: discord.Interaction, channel: discord.abc.GuildCha
     await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
-        case_id = await add_case(session, guild_id, "unlock", interaction.user,
+        cfg = await get_config(session, guild)
+        case_id = await add_case(session, guild, "unlock", interaction.user,
                                 type('Obj', (object,), {'id': channel.id, '__str__': lambda s: f"#{channel.name}"})(), reason)
         
-        locked = await get_locked_channels(session, guild_id)
+        locked = await get_locked_channels(session, guild)
         locked.pop(str(channel.id), None)
-        await save_locked_channels(session, guild_id, locked)
+        await save_locked_channels(session, guild, locked)
     
     e = mod_embed(0x57F287, "Channel unlocked", [
         ("Channel", channel.mention, True),
@@ -1484,8 +1525,8 @@ async def lockall(interaction: discord.Interaction, reason: str = "Server lockdo
     locked_count = 0
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
-        locked = await get_locked_channels(session, guild_id)
+        cfg = await get_config(session, guild)
+        locked = await get_locked_channels(session, guild)
         
         for channel in interaction.guild.text_channels:
             try:
@@ -1497,8 +1538,8 @@ async def lockall(interaction: discord.Interaction, reason: str = "Server lockdo
             except:
                 pass
         
-        await save_locked_channels(session, guild_id, locked)
-        case_id = await add_case(session, guild_id, "lockall", interaction.user,
+        await save_locked_channels(session, guild, locked)
+        case_id = await add_case(session, guild, "lockall", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{locked_count} channels"})(), reason)
     
     await interaction.followup.send(f"🔒 Locked **{locked_count}** channels | Case #{case_id}", ephemeral=True)
@@ -1513,8 +1554,8 @@ async def unlockall(interaction: discord.Interaction, reason: str = "Unlocking s
     unlocked_count = 0
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
-        locked = await get_locked_channels(session, guild_id)
+        cfg = await get_config(session, guild)
+        locked = await get_locked_channels(session, guild)
         
         for channel_id in list(locked.keys()):
             channel = interaction.guild.get_channel(int(channel_id))
@@ -1527,8 +1568,8 @@ async def unlockall(interaction: discord.Interaction, reason: str = "Unlocking s
                 except:
                     pass
         
-        await save_locked_channels(session, guild_id, {})
-        case_id = await add_case(session, guild_id, "unlockall", interaction.user,
+        await save_locked_channels(session, guild, {})
+        case_id = await add_case(session, guild, "unlockall", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{unlocked_count} channels"})(), reason)
     
     await interaction.followup.send(f"🔓 Unlocked **{unlocked_count}** channels | Case #{case_id}", ephemeral=True)
@@ -1586,8 +1627,8 @@ async def purge(interaction: discord.Interaction, amount: int, user: discord.Mem
     deleted = await interaction.channel.purge(limit=amount, check=check)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "purge", interaction.user,
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "purge", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{len(deleted)} messages"})(),
                                 f"In #{interaction.channel.name}")
     
@@ -1666,8 +1707,8 @@ async def nuke(interaction: discord.Interaction, channel: discord.TextChannel = 
     await channel.delete(reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "nuke", interaction.user,
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "nuke", interaction.user,
                                 type('Obj', (object,), {'id': new_channel.id, '__str__': lambda s: f"#{new_channel.name}"})(), reason)
     
     await new_channel.send(f"💥 Channel nuked by {interaction.user.mention} | Case #{case_id}")
@@ -1690,8 +1731,8 @@ async def vckick(interaction: discord.Interaction, member: discord.Member, reaso
     await member.move_to(None, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "vckick", interaction.user, member, reason)
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "vckick", interaction.user, member, reason)
     
     await interaction.followup.send(f"✅ Kicked **{member}** from voice | Case #{case_id}", ephemeral=True)
 
@@ -1723,8 +1764,8 @@ async def vcmute(interaction: discord.Interaction, member: discord.Member, reaso
     await member.edit(mute=True, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "vcmute", interaction.user, member, reason)
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "vcmute", interaction.user, member, reason)
     
     await interaction.followup.send(f"✅ Server muted **{member}** | Case #{case_id}", ephemeral=True)
 
@@ -1751,8 +1792,8 @@ async def vcdeafen(interaction: discord.Interaction, member: discord.Member, rea
     await member.edit(deafen=True, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "vcdeafen", interaction.user, member, reason)
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "vcdeafen", interaction.user, member, reason)
     
     await interaction.followup.send(f"✅ Server deafened **{member}** | Case #{case_id}", ephemeral=True)
 
@@ -1783,8 +1824,8 @@ async def roleadd(interaction: discord.Interaction, member: discord.Member, role
     await member.add_roles(role, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "roleadd", interaction.user, member, f"+{role.name}: {reason}")
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "roleadd", interaction.user, member, f"+{role.name}: {reason}")
     
     await interaction.followup.send(f"✅ Added **{role.name}** to **{member}** | Case #{case_id}", ephemeral=True)
 
@@ -1802,8 +1843,8 @@ async def roleremove(interaction: discord.Interaction, member: discord.Member, r
     await member.remove_roles(role, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, str(interaction.guild_id))
-        case_id = await add_case(session, str(interaction.guild_id), "roleremove", interaction.user, member, f"-{role.name}: {reason}")
+        cfg = await get_config(session, interaction.guild)
+        case_id = await add_case(session, interaction.guild, "roleremove", interaction.user, member, f"-{role.name}: {reason}")
     
     await interaction.followup.send(f"✅ Removed **{role.name}** from **{member}** | Case #{case_id}", ephemeral=True)
 
@@ -1857,7 +1898,7 @@ async def quarantine(interaction: discord.Interaction, member: discord.Member, r
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     
     quarantine_role_id = cfg.get("quarantine_role")
     if not quarantine_role_id:
@@ -1880,17 +1921,17 @@ async def quarantine(interaction: discord.Interaction, member: discord.Member, r
         return
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
-        case_id = await add_case(session, guild_id, "quarantine", interaction.user, member, reason)
+        cfg = await get_config(session, guild)
+        case_id = await add_case(session, guild, "quarantine", interaction.user, member, reason)
         
         # Store old roles for later restoration
-        all_locked, _ = await gh_read(session, FILE_LOCKED)
+        all_locked, _ = await gh_read(session, FILE_LOCKED, guild_branch(interaction.guild))
         if not all_locked:
             all_locked = {}
         if "quarantine_roles" not in all_locked:
             all_locked["quarantine_roles"] = {}
         all_locked["quarantine_roles"][str(member.id)] = old_roles
-        await gh_write(session, FILE_LOCKED, all_locked, None, "Store quarantine roles")
+        await gh_write(session, FILE_LOCKED, all_locked, None, "Store quarantine roles", guild_branch(interaction.guild))
     
     e = mod_embed(0x9B59B6, "Member quarantined", [
         ("User", f"{member} ({member.id})", True),
@@ -1909,14 +1950,14 @@ async def unquarantine(interaction: discord.Interaction, member: discord.Member,
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         
         # Get stored roles
-        all_locked, _ = await gh_read(session, FILE_LOCKED)
+        all_locked, _ = await gh_read(session, FILE_LOCKED, guild_branch(interaction.guild))
         stored_roles = []
         if all_locked and "quarantine_roles" in all_locked:
             stored_roles = all_locked["quarantine_roles"].pop(str(member.id), [])
-            await gh_write(session, FILE_LOCKED, all_locked, None, "Restore quarantine roles")
+            await gh_write(session, FILE_LOCKED, all_locked, None, "Restore quarantine roles", guild_branch(interaction.guild))
     
     # Remove quarantine role
     quarantine_role_id = cfg.get("quarantine_role")
@@ -1933,7 +1974,7 @@ async def unquarantine(interaction: discord.Interaction, member: discord.Member,
             await member.add_roles(*roles_to_add, reason=f"Unquarantine: restore roles")
     
     async with aiohttp.ClientSession() as session:
-        case_id = await add_case(session, guild_id, "unquarantine", interaction.user, member, reason)
+        case_id = await add_case(session, guild, "unquarantine", interaction.user, member, reason)
     
     await interaction.followup.send(f"✅ Released **{member}** from quarantine | Case #{case_id}", ephemeral=True)
 
@@ -1950,11 +1991,11 @@ async def raidmode_cmd(interaction: discord.Interaction, enabled: bool):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["raid_mode"] = enabled
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
         
-        case_id = await add_case(session, guild_id, "raidmode", interaction.user,
+        case_id = await add_case(session, guild, "raidmode", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: "Server"})(),
                                 f"Raid mode: {'enabled' if enabled else 'disabled'}")
     
@@ -1969,9 +2010,9 @@ async def panic(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["raid_mode"] = True
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     
     # Lock all channels
     locked_count = 0
@@ -2002,11 +2043,11 @@ async def unpanic(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["raid_mode"] = False
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
         
-        await save_locked_channels(session, guild_id, {})
+        await save_locked_channels(session, guild, {})
     
     await interaction.followup.send("✅ Panic mode disabled. Use `/unlockall` to unlock channels.", ephemeral=True)
 
@@ -2666,8 +2707,8 @@ async def history(interaction: discord.Interaction, member: discord.Member):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, guild_id)
-        warnings = await get_warnings(session, guild_id)
+        all_cases = await get_cases(session, guild)
+        warnings = await get_warnings(session, guild)
     
     # Filter cases for this user
     user_cases = [c for c in all_cases if c.get("target_id") == str(member.id)]
@@ -2721,7 +2762,7 @@ async def modhistory_cmd(interaction: discord.Interaction, member: discord.Membe
 async def cases(interaction: discord.Interaction, user: discord.Member = None):
     await interaction.response.defer(ephemeral=True)
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, str(interaction.guild_id))
+        all_cases = await get_cases(session, interaction.guild)
     
     if user:
         all_cases = [c for c in all_cases if c.get("target_id") == str(user.id)]
@@ -2757,7 +2798,7 @@ async def case_cmd(interaction: discord.Interaction, case_id: int, action: str =
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, guild_id)
+        all_cases = await get_cases(session, guild)
         
         case = next((c for c in all_cases if c.get("id") == case_id), None)
         
@@ -2775,12 +2816,12 @@ async def case_cmd(interaction: discord.Interaction, case_id: int, action: str =
         
         elif action == "edit" and new_reason:
             case["reason"] = new_reason
-            await save_cases(session, guild_id, all_cases)
+            await save_cases(session, guild, all_cases)
             await interaction.followup.send(f"✅ Case #{case_id} reason updated to: {new_reason}", ephemeral=True)
         
         elif action == "delete":
             all_cases.remove(case)
-            await save_cases(session, guild_id, all_cases)
+            await save_cases(session, guild, all_cases)
             await interaction.followup.send(f"✅ Case #{case_id} deleted.", ephemeral=True)
         
         elif action == "pardon":
@@ -2788,7 +2829,7 @@ async def case_cmd(interaction: discord.Interaction, case_id: int, action: str =
             case["pardoned"] = True
             case["pardoned_by"] = str(interaction.user)
             case["pardoned_at"] = datetime.datetime.utcnow().isoformat()
-            await save_cases(session, guild_id, all_cases)
+            await save_cases(session, guild, all_cases)
             await interaction.followup.send(f"✅ Case #{case_id} has been pardoned.", ephemeral=True)
 
 
@@ -2807,13 +2848,13 @@ async def honeypot_add(interaction: discord.Interaction, channel: discord.TextCh
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_hp, sha = await gh_read(session, FILE_HONEYPOT)
+        all_hp, sha = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
         if not all_hp:
             all_hp = {}
         if guild_id not in all_hp:
             all_hp[guild_id] = {}
         all_hp[guild_id][str(channel.id)] = True
-        await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: add honeypot {channel.id}")
+        await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: add honeypot {channel.id}", guild_branch(interaction.guild))
     
     # Send warning message in the honeypot channel
     default_warning = (
@@ -2855,12 +2896,12 @@ async def honeypot_protect(interaction: discord.Interaction, role: discord.Role)
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         protected = cfg.get("honeypot_protected_roles", [])
         if str(role.id) not in protected:
             protected.append(str(role.id))
             cfg["honeypot_protected_roles"] = protected
-            await save_config(session, guild_id, cfg)
+            await save_config(session, guild, cfg)
             await interaction.followup.send(f"✅ **{role.name}** is now protected from honeypot.", ephemeral=True)
         else:
             await interaction.followup.send(f"⚠️ **{role.name}** is already protected.", ephemeral=True)
@@ -2874,12 +2915,12 @@ async def honeypot_unprotect(interaction: discord.Interaction, role: discord.Rol
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         protected = cfg.get("honeypot_protected_roles", [])
         if str(role.id) in protected:
             protected.remove(str(role.id))
             cfg["honeypot_protected_roles"] = protected
-            await save_config(session, guild_id, cfg)
+            await save_config(session, guild, cfg)
             await interaction.followup.send(f"✅ **{role.name}** is no longer protected from honeypot.", ephemeral=True)
         else:
             await interaction.followup.send(f"⚠️ **{role.name}** was not protected.", ephemeral=True)
@@ -2892,10 +2933,10 @@ async def honeypot_remove(interaction: discord.Interaction, channel: discord.Tex
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_hp, sha = await gh_read(session, FILE_HONEYPOT)
+        all_hp, sha = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
         if all_hp and guild_id in all_hp:
             all_hp[guild_id].pop(str(channel.id), None)
-            await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: remove honeypot {channel.id}")
+            await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: remove honeypot {channel.id}", guild_branch(interaction.guild))
     await interaction.followup.send(f"✅ **{channel.name}** is no longer a honeypot.", ephemeral=True)
 
 
@@ -2906,7 +2947,7 @@ async def honeypot_list(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_hp, _ = await gh_read(session, FILE_HONEYPOT)
+        all_hp, _ = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
     
     guild_hp = all_hp.get(guild_id, {}) if all_hp else {}
     
@@ -2953,7 +2994,7 @@ class TicketOpenView(discord.ui.View):
         guild    = interaction.guild
         guild_id = str(guild.id)
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, guild_id)
+            cfg = await get_config(session, guild)
         cat_id = cfg.get("ticket_category")
         category = guild.get_channel(int(cat_id)) if cat_id else None
 
@@ -3012,14 +3053,14 @@ async def rxrole_add(interaction: discord.Interaction, message_id: str, emoji: s
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_rx, sha = await gh_read(session, FILE_RXROLES)
+        all_rx, sha = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
         if not all_rx:
             all_rx = {}
         if guild_id not in all_rx:
             all_rx[guild_id] = {}
         key = f"{message_id}:{emoji}"
         all_rx[guild_id][key] = str(role.id)
-        await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: add rxrole {key}")
+        await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: add rxrole {key}", guild_branch(interaction.guild))
     try:
         msg = await interaction.channel.fetch_message(int(message_id))
         await msg.add_reaction(emoji)
@@ -3035,11 +3076,11 @@ async def rxrole_remove(interaction: discord.Interaction, message_id: str, emoji
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_rx, sha = await gh_read(session, FILE_RXROLES)
+        all_rx, sha = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
         if all_rx and guild_id in all_rx:
             key = f"{message_id}:{emoji}"
             all_rx[guild_id].pop(key, None)
-            await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: remove rxrole {key}")
+            await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: remove rxrole {key}", guild_branch(interaction.guild))
     await interaction.followup.send(f"✅ Reaction role removed.", ephemeral=True)
 
 
@@ -3062,7 +3103,7 @@ async def giveaway(interaction: discord.Interaction, channel: discord.TextChanne
     await msg.add_reaction("🎉")
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_g, sha = await gh_read(session, FILE_GIVEAWAYS)
+        all_g, sha = await gh_read(session, FILE_GIVEAWAYS, guild_branch(interaction.guild))
         if not all_g:
             all_g = {}
         if guild_id not in all_g:
@@ -3075,7 +3116,7 @@ async def giveaway(interaction: discord.Interaction, channel: discord.TextChanne
             "ends_at":     ends_at.isoformat(),
             "ended":       False,
         })
-        await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: new giveaway")
+        await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: new giveaway", guild_branch(interaction.guild))
     await interaction.followup.send(f"✅ Giveaway started in {channel.mention}!", ephemeral=True)
 
 
@@ -3083,7 +3124,7 @@ async def giveaway(interaction: discord.Interaction, channel: discord.TextChanne
 async def check_giveaways():
     now = datetime.datetime.utcnow()
     async with aiohttp.ClientSession() as session:
-        all_g, sha = await gh_read(session, FILE_GIVEAWAYS)
+        all_g, sha = await gh_read(session, FILE_GIVEAWAYS, guild_branch(interaction.guild))
         if not all_g:
             return
         changed = False
@@ -3115,7 +3156,7 @@ async def check_giveaways():
                     except Exception:
                         pass
         if changed:
-            await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: end giveaway")
+            await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: end giveaway", guild_branch(interaction.guild))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3128,7 +3169,7 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
     member   = member or interaction.user
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        levels = await get_levels(session, guild_id)
+        levels = await get_levels(session, guild)
     entry = levels.get(str(member.id), {"xp": 0, "level": 0})
     xp_needed = (entry["level"] + 1) * 100
     e = discord.Embed(title=f"⭐ {member.display_name}'s rank", color=0xFFD700)
@@ -3145,7 +3186,7 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
 async def leaderboard(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        levels = await get_levels(session, guild_id)
+        levels = await get_levels(session, guild)
     sorted_users = sorted(levels.items(), key=lambda x: (x[1].get("level", 0), x[1].get("xp", 0)), reverse=True)[:10]
     e = discord.Embed(title="🏆 XP Leaderboard", color=0xFFD700)
     medals = ["🥇", "🥈", "🥉"]
@@ -3187,9 +3228,9 @@ async def setup_modlog(interaction: discord.Interaction, channel: discord.TextCh
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["mod_log"] = str(channel.id)
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Mod log set to {channel.mention}", ephemeral=True)
 
 
@@ -3200,11 +3241,11 @@ async def setup_welcome(interaction: discord.Interaction, channel: discord.TextC
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["welcome_channel"] = str(channel.id)
         if message:
             cfg["welcome_message"] = message
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Welcome channel set to {channel.mention}", ephemeral=True)
 
 
@@ -3215,9 +3256,9 @@ async def setup_tickets(interaction: discord.Interaction, category: discord.Cate
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["ticket_category"] = str(category.id)
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Ticket category set to **{category.name}**", ephemeral=True)
 
 
@@ -3228,9 +3269,9 @@ async def setup_muted(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["muted_role"] = str(role.id)
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Muted role set to {role.mention}", ephemeral=True)
 
 
@@ -3241,9 +3282,9 @@ async def setup_quarantine(interaction: discord.Interaction, role: discord.Role)
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["quarantine_role"] = str(role.id)
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Quarantine role set to {role.mention}", ephemeral=True)
 
 
@@ -3254,10 +3295,10 @@ async def setup_modrole(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        mod_data = await get_mod_roles(session, guild_id)
+        mod_data = await get_mod_roles(session, guild)
         if str(role.id) not in mod_data["mod_roles"]:
             mod_data["mod_roles"].append(str(role.id))
-        await save_mod_roles(session, guild_id, mod_data)
+        await save_mod_roles(session, guild, mod_data)
     await interaction.followup.send(f"✅ {role.mention} is now a moderator role.", ephemeral=True)
 
 
@@ -3268,10 +3309,10 @@ async def setup_adminrole(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        mod_data = await get_mod_roles(session, guild_id)
+        mod_data = await get_mod_roles(session, guild)
         if str(role.id) not in mod_data["admin_roles"]:
             mod_data["admin_roles"].append(str(role.id))
-        await save_mod_roles(session, guild_id, mod_data)
+        await save_mod_roles(session, guild, mod_data)
     await interaction.followup.send(f"✅ {role.mention} is now an admin role.", ephemeral=True)
 
 
@@ -3296,13 +3337,13 @@ async def automod_setup(interaction: discord.Interaction, rule: str, enabled: bo
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if "automod" not in cfg:
             cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
         if rule not in cfg["automod"]:
             cfg["automod"][rule] = {"enabled": False}
         cfg["automod"][rule]["enabled"] = enabled
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     status = "enabled ✅" if enabled else "disabled ❌"
     await interaction.followup.send(f"Automod **{rule}** is now {status}", ephemeral=True)
 
@@ -3318,7 +3359,7 @@ async def automod_words(interaction: discord.Interaction, action: str, word: str
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if "automod" not in cfg:
             cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
         words = cfg["automod"].setdefault("words", {}).setdefault("blacklist", [])
@@ -3326,7 +3367,7 @@ async def automod_words(interaction: discord.Interaction, action: str, word: str
             words.append(word.lower())
         elif action == "remove" and word.lower() in words:
             words.remove(word.lower())
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Word `{word}` {action}ed to blacklist.", ephemeral=True)
 
 
@@ -3341,7 +3382,7 @@ async def automod_links(interaction: discord.Interaction, action: str, domain: s
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if "automod" not in cfg:
             cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
         whitelist = cfg["automod"].setdefault("links", {}).setdefault("whitelist", [])
@@ -3349,7 +3390,7 @@ async def automod_links(interaction: discord.Interaction, action: str, domain: s
             whitelist.append(domain.lower())
         elif action == "remove" and domain.lower() in whitelist:
             whitelist.remove(domain.lower())
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     await interaction.followup.send(f"✅ Domain `{domain}` {action}ed to whitelist.", ephemeral=True)
 
 
@@ -3454,7 +3495,7 @@ FILE_CUSTOMCMDS = f"{DATA_ROOT}/customcmds.json"
 FILE_INVITES = f"{DATA_ROOT}/invites.json"
 
 async def get_reminders(session, guild_id: str = None) -> dict:
-    all_r, _ = await gh_read(session, FILE_REMINDERS)
+    all_r, _ = await gh_read(session, FILE_REMINDERS, guild_branch(interaction.guild))
     if not all_r:
         return {}
     if guild_id:
@@ -3462,50 +3503,50 @@ async def get_reminders(session, guild_id: str = None) -> dict:
     return all_r
 
 async def save_reminders(session, guild_id: str, reminders: dict):
-    all_r, sha = await gh_read(session, FILE_REMINDERS)
+    all_r, sha = await gh_read(session, FILE_REMINDERS, guild_branch(interaction.guild))
     if not all_r:
         all_r = {}
     all_r[guild_id] = reminders
-    await gh_write(session, FILE_REMINDERS, all_r, sha, "Vortex: update reminders")
+    await gh_write(session, FILE_REMINDERS, all_r, sha, "Vortex: update reminders", guild_branch(interaction.guild))
 
 async def get_scheduled(session, guild_id: str) -> list:
-    all_s, _ = await gh_read(session, FILE_SCHEDULED)
+    all_s, _ = await gh_read(session, FILE_SCHEDULED, guild_branch(interaction.guild))
     if not all_s:
         return []
     return all_s.get(guild_id, [])
 
 async def save_scheduled(session, guild_id: str, tasks: list):
-    all_s, sha = await gh_read(session, FILE_SCHEDULED)
+    all_s, sha = await gh_read(session, FILE_SCHEDULED, guild_branch(interaction.guild))
     if not all_s:
         all_s = {}
     all_s[guild_id] = tasks
-    await gh_write(session, FILE_SCHEDULED, all_s, sha, "Vortex: update scheduled")
+    await gh_write(session, FILE_SCHEDULED, all_s, sha, "Vortex: update scheduled", guild_branch(interaction.guild))
 
 async def get_custom_cmds(session, guild_id: str) -> dict:
-    all_c, _ = await gh_read(session, FILE_CUSTOMCMDS)
+    all_c, _ = await gh_read(session, FILE_CUSTOMCMDS, guild_branch(interaction.guild))
     if not all_c:
         return {}
     return all_c.get(guild_id, {})
 
 async def save_custom_cmds(session, guild_id: str, cmds: dict):
-    all_c, sha = await gh_read(session, FILE_CUSTOMCMDS)
+    all_c, sha = await gh_read(session, FILE_CUSTOMCMDS, guild_branch(interaction.guild))
     if not all_c:
         all_c = {}
     all_c[guild_id] = cmds
-    await gh_write(session, FILE_CUSTOMCMDS, all_c, sha, "Vortex: update custom commands")
+    await gh_write(session, FILE_CUSTOMCMDS, all_c, sha, "Vortex: update custom commands", guild_branch(interaction.guild))
 
 async def get_invites(session, guild_id: str) -> dict:
-    all_i, _ = await gh_read(session, FILE_INVITES)
+    all_i, _ = await gh_read(session, FILE_INVITES, guild_branch(interaction.guild))
     if not all_i:
         return {}
     return all_i.get(guild_id, {})
 
 async def save_invites(session, guild_id: str, invites: dict):
-    all_i, sha = await gh_read(session, FILE_INVITES)
+    all_i, sha = await gh_read(session, FILE_INVITES, guild_branch(interaction.guild))
     if not all_i:
         all_i = {}
     all_i[guild_id] = invites
-    await gh_write(session, FILE_INVITES, all_i, sha, "Vortex: update invites")
+    await gh_write(session, FILE_INVITES, all_i, sha, "Vortex: update invites", guild_branch(interaction.guild))
 
 
 @bot.tree.command(name="remind", description="Set a reminder")
@@ -4287,7 +4328,7 @@ async def search_cmd(interaction: discord.Interaction, user: discord.Member = No
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, guild_id)
+        all_cases = await get_cases(session, guild)
     
     results = all_cases
     
@@ -4418,56 +4459,56 @@ FILE_STICKYROLES = f"{DATA_ROOT}/stickyroles.json"
 FILE_BIRTHDAYS = f"{DATA_ROOT}/birthdays.json"
 
 async def get_autorole(session, guild_id: str) -> dict:
-    all_a, _ = await gh_read(session, FILE_AUTOROLE)
+    all_a, _ = await gh_read(session, FILE_AUTOROLE, guild_branch(interaction.guild))
     if not all_a:
         return {}
     return all_a.get(guild_id, {})
 
 async def save_autorole(session, guild_id: str, data: dict):
-    all_a, sha = await gh_read(session, FILE_AUTOROLE)
+    all_a, sha = await gh_read(session, FILE_AUTOROLE, guild_branch(interaction.guild))
     if not all_a:
         all_a = {}
     all_a[guild_id] = data
-    await gh_write(session, FILE_AUTOROLE, all_a, sha, "Vortex: update autorole")
+    await gh_write(session, FILE_AUTOROLE, all_a, sha, "Vortex: update autorole", guild_branch(interaction.guild))
 
 async def get_sticky_roles(session, guild_id: str) -> dict:
-    all_s, _ = await gh_read(session, FILE_STICKYROLES)
+    all_s, _ = await gh_read(session, FILE_STICKYROLES, guild_branch(interaction.guild))
     if not all_s:
         return {}
     return all_s.get(guild_id, {})
 
 async def save_sticky_roles(session, guild_id: str, data: dict):
-    all_s, sha = await gh_read(session, FILE_STICKYROLES)
+    all_s, sha = await gh_read(session, FILE_STICKYROLES, guild_branch(interaction.guild))
     if not all_s:
         all_s = {}
     all_s[guild_id] = data
-    await gh_write(session, FILE_STICKYROLES, all_s, sha, "Vortex: update sticky roles")
+    await gh_write(session, FILE_STICKYROLES, all_s, sha, "Vortex: update sticky roles", guild_branch(interaction.guild))
 
 async def get_starboard(session, guild_id: str) -> dict:
-    all_s, _ = await gh_read(session, FILE_STARBOARD)
+    all_s, _ = await gh_read(session, FILE_STARBOARD, guild_branch(interaction.guild))
     if not all_s:
         return {}
     return all_s.get(guild_id, {})
 
 async def save_starboard(session, guild_id: str, data: dict):
-    all_s, sha = await gh_read(session, FILE_STARBOARD)
+    all_s, sha = await gh_read(session, FILE_STARBOARD, guild_branch(interaction.guild))
     if not all_s:
         all_s = {}
     all_s[guild_id] = data
-    await gh_write(session, FILE_STARBOARD, all_s, sha, "Vortex: update starboard")
+    await gh_write(session, FILE_STARBOARD, all_s, sha, "Vortex: update starboard", guild_branch(interaction.guild))
 
 async def get_birthdays(session, guild_id: str) -> dict:
-    all_b, _ = await gh_read(session, FILE_BIRTHDAYS)
+    all_b, _ = await gh_read(session, FILE_BIRTHDAYS, guild_branch(interaction.guild))
     if not all_b:
         return {}
     return all_b.get(guild_id, {})
 
 async def save_birthdays(session, guild_id: str, data: dict):
-    all_b, sha = await gh_read(session, FILE_BIRTHDAYS)
+    all_b, sha = await gh_read(session, FILE_BIRTHDAYS, guild_branch(interaction.guild))
     if not all_b:
         all_b = {}
     all_b[guild_id] = data
-    await gh_write(session, FILE_BIRTHDAYS, all_b, sha, "Vortex: update birthdays")
+    await gh_write(session, FILE_BIRTHDAYS, all_b, sha, "Vortex: update birthdays", guild_branch(interaction.guild))
 
 
 @bot.tree.command(name="autorole", description="Configure auto-role on join")
@@ -4529,9 +4570,9 @@ async def stickyroles_cmd(interaction: discord.Interaction, enabled: bool):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["sticky_roles"] = enabled
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     
     status = "enabled" if enabled else "disabled"
     await interaction.followup.send(f"✅ Sticky roles {status}", ephemeral=True)
@@ -4686,11 +4727,11 @@ async def autopublish_cmd(interaction: discord.Interaction, channel: discord.Tex
         return
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if "autopublish" not in cfg:
             cfg["autopublish"] = {}
         cfg["autopublish"][str(channel.id)] = enabled
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     
     status = "enabled" if enabled else "disabled"
     await interaction.followup.send(f"✅ Auto-publish {status} in {channel.mention}", ephemeral=True)
@@ -4708,11 +4749,11 @@ async def levelrole_add(interaction: discord.Interaction, level: int, role: disc
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if "level_roles" not in cfg:
             cfg["level_roles"] = {}
         cfg["level_roles"][str(level)] = str(role.id)
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     
     await interaction.followup.send(f"✅ Level **{level}** will now reward {role.mention}", ephemeral=True)
 
@@ -4725,10 +4766,10 @@ async def levelrole_remove(interaction: discord.Interaction, level: int):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if "level_roles" in cfg and str(level) in cfg["level_roles"]:
             del cfg["level_roles"][str(level)]
-            await save_config(session, guild_id, cfg)
+            await save_config(session, guild, cfg)
             await interaction.followup.send(f"✅ Removed level **{level}** reward", ephemeral=True)
         else:
             await interaction.followup.send(f"❌ No reward set for level {level}", ephemeral=True)
@@ -4740,7 +4781,7 @@ async def levelrole_list(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     
     level_roles = cfg.get("level_roles", {})
     
@@ -4780,7 +4821,7 @@ async def tempwarn_cmd(interaction: discord.Interaction, member: discord.Member,
     expire_time = discord.utils.utcnow() + td
     
     async with aiohttp.ClientSession() as session:
-        warnings = await get_warnings(session, guild_id)
+        warnings = await get_warnings(session, guild)
         uid = str(member.id)
         if uid not in warnings:
             warnings[uid] = []
@@ -4794,7 +4835,7 @@ async def tempwarn_cmd(interaction: discord.Interaction, member: discord.Member,
             "temporary": True,
         }
         warnings[uid].append(warn_data)
-        await save_warnings(session, guild_id, warnings)
+        await save_warnings(session, guild, warnings)
         
         # Schedule warning removal
         temp_data = await get_temp_actions(session)
@@ -4829,7 +4870,7 @@ async def transferwarns_cmd(interaction: discord.Interaction, from_user: discord
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        warnings = await get_warnings(session, guild_id)
+        warnings = await get_warnings(session, guild)
         
         from_warns = warnings.get(str(from_user.id), [])
         if not from_warns:
@@ -4841,7 +4882,7 @@ async def transferwarns_cmd(interaction: discord.Interaction, from_user: discord
             warnings[str(to_user.id)] = []
         warnings[str(to_user.id)].extend(from_warns)
         warnings[str(from_user.id)] = []
-        await save_warnings(session, guild_id, warnings)
+        await save_warnings(session, guild, warnings)
     
     await interaction.followup.send(f"✅ Transferred **{len(from_warns)}** warnings from {from_user} to {to_user}", ephemeral=True)
 
@@ -4853,17 +4894,17 @@ async def transferwarns_cmd(interaction: discord.Interaction, from_user: discord
 FILE_POLLS = f"{DATA_ROOT}/polls.json"
 
 async def get_polls(session, guild_id: str) -> dict:
-    all_p, _ = await gh_read(session, FILE_POLLS)
+    all_p, _ = await gh_read(session, FILE_POLLS, guild_branch(interaction.guild))
     if not all_p:
         return {}
     return all_p.get(guild_id, {})
 
 async def save_polls(session, guild_id: str, polls: dict):
-    all_p, sha = await gh_read(session, FILE_POLLS)
+    all_p, sha = await gh_read(session, FILE_POLLS, guild_branch(interaction.guild))
     if not all_p:
         all_p = {}
     all_p[guild_id] = polls
-    await gh_write(session, FILE_POLLS, all_p, sha, "Vortex: update polls")
+    await gh_write(session, FILE_POLLS, all_p, sha, "Vortex: update polls", guild_branch(interaction.guild))
 
 
 @bot.tree.command(name="poll_end", description="End a poll and show results")
@@ -4917,7 +4958,7 @@ class VerificationView(discord.ui.View):
         guild_id = str(interaction.guild_id)
         
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, guild_id)
+            cfg = await get_config(session, guild)
         
         verified_role_id = cfg.get("verified_role")
         if not verified_role_id:
@@ -4945,9 +4986,9 @@ async def verify_setup_cmd(interaction: discord.Interaction, role: discord.Role,
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         cfg["verified_role"] = str(role.id)
-        await save_config(session, guild_id, cfg)
+        await save_config(session, guild, cfg)
     
     e = discord.Embed(
         title="✅ Verification",
@@ -4966,7 +5007,7 @@ async def unverify_cmd(interaction: discord.Interaction, member: discord.Member)
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
     
     verified_role_id = cfg.get("verified_role")
     if verified_role_id:
@@ -5017,7 +5058,7 @@ async def on_member_join(member: discord.Member):
                     pass
         
         # Sticky roles - restore roles on rejoin
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         if cfg.get("sticky_roles"):
             sticky = await get_sticky_roles(session, guild_id)
             if str(member.id) in sticky:
@@ -5036,7 +5077,7 @@ async def on_member_remove(member: discord.Member):
     guild_id = str(member.guild.id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild_id)
+        cfg = await get_config(session, guild)
         
         if cfg.get("sticky_roles"):
             sticky = await get_sticky_roles(session, guild_id)
@@ -5161,7 +5202,7 @@ async def on_message(message: discord.Message):
         guild_id = str(message.guild.id)
         
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, guild_id)
+            cfg = await get_config(session, guild)
         
         autopublish = cfg.get("autopublish", {})
         if autopublish.get(str(message.channel.id)) and message.channel.is_news():
@@ -5181,7 +5222,7 @@ async def on_message(message: discord.Message):
 # Update the leveling system to include role rewards
 async def check_level_roles(member: discord.Member, level: int, session):
     guild_id = str(member.guild.id)
-    cfg = await get_config(session, guild_id)
+    cfg = await get_config(session, guild)
     level_roles = cfg.get("level_roles", {})
     
     # Check all level thresholds up to current level
