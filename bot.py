@@ -42,9 +42,6 @@ FILE_RAIDMODE    = "raidmode.json"
 FILE_MODROLES    = "modroles.json"
 FILE_LOCKED      = "locked.json"
 
-# Extra file names (used in later sections) – stored flat like the others
-DATA_ROOT        = "data"  # prefix for extra data files on the branch
-
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG = {
@@ -3853,50 +3850,6 @@ async def reminders_cmd(interaction: discord.Interaction):
     await interaction.followup.send(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="schedule", description="Schedule an action")
-@app_commands.describe(
-    action="Action to schedule",
-    target="Target (user ID or channel)",
-    time="Time until action (e.g., 1h, 1d)",
-    reason="Reason (optional)"
-)
-@app_commands.choices(action=[
-    app_commands.Choice(name="ban", value="ban"),
-    app_commands.Choice(name="unban", value="unban"),
-    app_commands.Choice(name="mute", value="mute"),
-    app_commands.Choice(name="unmute", value="unmute"),
-    app_commands.Choice(name="kick", value="kick"),
-    app_commands.Choice(name="lock", value="lock"),
-    app_commands.Choice(name="unlock", value="unlock"),
-])
-@is_mod()
-async def schedule_cmd(interaction: discord.Interaction, action: str, target: str, time: str, reason: str = "Scheduled action"):
-    await interaction.response.defer(ephemeral=True)
-    
-    td = parse_duration(time)
-    if td is None:
-        await interaction.followup.send("❌ Invalid duration. Use format like 1h, 30m, 1d", ephemeral=True)
-        return
-    
-    execute_time = discord.utils.utcnow() + td
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = await get_scheduled(session, guild_id)
-        
-        task_id = str(int(time.time() * 1000))
-        tasks.append({
-            "id": task_id,
-            "action": action,
-            "target": target,
-            "reason": reason,
-            "execute_time": execute_time.isoformat(),
-            "created_by": str(interaction.user.id),
-            "channel_id": str(interaction.channel_id),
-        })
-        await save_scheduled(session, guild_id, tasks)
-    
-    await interaction.followup.send(f"⏰ Scheduled **{action}** in **{format_timedelta(td)}**\nTarget: {target}\nReason: {reason}", ephemeral=True)
 
 
 @bot.event
