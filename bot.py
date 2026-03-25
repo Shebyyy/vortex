@@ -42,6 +42,9 @@ FILE_RAIDMODE    = "raidmode.json"
 FILE_MODROLES    = "modroles.json"
 FILE_LOCKED      = "locked.json"
 
+# Extra file names (used in later sections) – stored flat like the others
+DATA_ROOT        = "data"  # prefix for extra data files on the branch
+
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG = {
@@ -193,6 +196,13 @@ def guild_branch(guild: discord.Guild) -> str:
     safe_name = re.sub(r"-+", "-", safe_name)[:40]
     return f"{guild.id}-{safe_name}"
 
+def guild_branch_from_id(guild_id: str) -> str:
+    """Look up the branch name by guild_id string (uses bot cache)."""
+    guild = bot.get_guild(int(guild_id)) if guild_id else None
+    if guild:
+        return guild_branch(guild)
+    return str(guild_id)  # fallback: bare id
+
 async def ensure_guild_branch(session: aiohttp.ClientSession, branch: str):
     """Create the guild branch from main if it doesn't exist yet."""
     # Check if branch exists
@@ -265,7 +275,7 @@ async def get_config(session, guild: discord.Guild) -> dict:
 async def save_config(session, guild: discord.Guild, cfg: dict):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_CONFIG, branch)
-    await gh_write(session, FILE_CONFIG, cfg, sha, f"Vortex: update config", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_CONFIG, cfg, sha, f"Vortex: update config", branch, guild_branch_from_id(guild_id))
 
 async def get_warnings(session, guild: discord.Guild) -> dict:
     branch = guild_branch(guild)
@@ -275,7 +285,7 @@ async def get_warnings(session, guild: discord.Guild) -> dict:
 async def save_warnings(session, guild: discord.Guild, warnings: dict):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_WARNINGS, branch)
-    await gh_write(session, FILE_WARNINGS, warnings, sha, "Vortex: update warnings", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_WARNINGS, warnings, sha, "Vortex: update warnings", branch)
 
 async def get_cases(session, guild: discord.Guild) -> list:
     branch = guild_branch(guild)
@@ -285,7 +295,7 @@ async def get_cases(session, guild: discord.Guild) -> list:
 async def save_cases(session, guild: discord.Guild, cases: list):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_CASES, branch)
-    await gh_write(session, FILE_CASES, cases, sha, "Vortex: update cases", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_CASES, cases, sha, "Vortex: update cases", branch)
 
 async def add_case(session, guild: discord.Guild, action: str, mod: discord.Member, target, reason: str, duration: str = None) -> int:
     cases = await get_cases(session, guild)
@@ -315,7 +325,7 @@ async def get_levels(session, guild: discord.Guild) -> dict:
 async def save_levels(session, guild: discord.Guild, levels: dict):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_LEVELS, branch)
-    await gh_write(session, FILE_LEVELS, levels, sha, "Vortex: update levels", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_LEVELS, levels, sha, "Vortex: update levels", branch)
 
 async def get_temp_actions(session, guild: discord.Guild) -> dict:
     branch = guild_branch(guild)
@@ -325,7 +335,7 @@ async def get_temp_actions(session, guild: discord.Guild) -> dict:
 async def save_temp_actions(session, guild: discord.Guild, data: dict):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_TEMPACTIONS, branch)
-    await gh_write(session, FILE_TEMPACTIONS, data, sha, "Vortex: update temp actions", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_TEMPACTIONS, data, sha, "Vortex: update temp actions", branch)
 
 async def get_mod_roles(session, guild: discord.Guild) -> dict:
     branch = guild_branch(guild)
@@ -335,7 +345,7 @@ async def get_mod_roles(session, guild: discord.Guild) -> dict:
 async def save_mod_roles(session, guild: discord.Guild, data: dict):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_MODROLES, branch)
-    await gh_write(session, FILE_MODROLES, data, sha, "Vortex: update mod roles", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_MODROLES, data, sha, "Vortex: update mod roles", branch)
 
 async def get_locked_channels(session, guild: discord.Guild) -> dict:
     branch = guild_branch(guild)
@@ -345,7 +355,7 @@ async def get_locked_channels(session, guild: discord.Guild) -> dict:
 async def save_locked_channels(session, guild: discord.Guild, data: dict):
     branch = guild_branch(guild)
     _, sha = await gh_read(session, FILE_LOCKED, branch)
-    await gh_write(session, FILE_LOCKED, data, sha, "Vortex: update locked channels", branch, guild_branch(interaction.guild))
+    await gh_write(session, FILE_LOCKED, data, sha, "Vortex: update locked channels", branch)
 
 # ── Mod log helper ─────────────────────────────────────────────────────────────
 
@@ -489,7 +499,7 @@ async def on_ready():
 async def on_member_join(member: discord.Member):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, member.guild)
         
         # Raid detection
         raid_mode = cfg.get("raid_mode", False)
@@ -542,7 +552,7 @@ async def on_member_join(member: discord.Member):
 async def on_member_remove(member: discord.Member):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, member.guild)
     if cfg.get("logging", {}).get("member_leave") and cfg.get("mod_log"):
         e = discord.Embed(title="🔴 Member left", color=0xED4245, timestamp=datetime.datetime.utcnow())
         e.set_thumbnail(url=member.display_avatar.url)
@@ -572,7 +582,7 @@ async def on_message_delete(message: discord.Message):
         _ghost_pings[guild_id].append(ghost_ping_data)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, message.guild)
     if cfg.get("logging", {}).get("message_delete") and cfg.get("mod_log"):
         e = discord.Embed(title="🗑️ Message deleted", color=0xFEE75C, timestamp=datetime.datetime.utcnow())
         e.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=True)
@@ -590,7 +600,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         return
     guild_id = str(before.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, before.guild)
     if cfg.get("logging", {}).get("message_edit") and cfg.get("mod_log"):
         e = discord.Embed(title="✏️ Message edited", color=0x5865F2, timestamp=datetime.datetime.utcnow())
         e.add_field(name="Author", value=f"{before.author} ({before.author.id})", inline=True)
@@ -604,7 +614,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 async def on_voice_state_update(member: discord.Member, before, after):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, before.guild)
     if not cfg.get("logging", {}).get("voice") or not cfg.get("mod_log"):
         return
     if before.channel == after.channel:
@@ -629,7 +639,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         return
     guild_id = str(before.guild.id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, before.guild)
     
     # Role change logging
     if before.roles != after.roles and cfg.get("logging", {}).get("role_change") and cfg.get("mod_log"):
@@ -667,7 +677,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
     guild_id = str(payload.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_rx, _ = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
+        all_rx, _ = await gh_read(session, FILE_RXROLES, guild_branch_from_id(guild_id))
     if not all_rx:
         return
     guild_rx = all_rx.get(guild_id, {})
@@ -688,7 +698,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         return
     guild_id = str(payload.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_rx, _ = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
+        all_rx, _ = await gh_read(session, FILE_RXROLES, guild_branch_from_id(guild_id))
     if not all_rx:
         return
     guild_rx = all_rx.get(guild_id, {})
@@ -714,13 +724,13 @@ async def on_message(message: discord.Message):
     content  = message.content
 
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, message.guild)
 
     am = cfg.get("automod", DEFAULT_CONFIG["automod"])
 
     # ── Honeypot check ─────────────────────────────────────────────────────────
     async with aiohttp.ClientSession() as session:
-        all_hp, _ = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
+        all_hp, _ = await gh_read(session, FILE_HONEYPOT, guild_branch_from_id(guild_id))
     if all_hp:
         guild_hp = all_hp.get(guild_id, {})
         if str(message.channel.id) in guild_hp:
@@ -756,7 +766,7 @@ async def on_message(message: discord.Message):
 
     # ── XP / leveling ──────────────────────────────────────────────────────────
     async with aiohttp.ClientSession() as session:
-        levels = await get_levels(session, guild)
+        levels = await get_levels(session, message.guild)
         uid = str(user.id)
         entry = levels.get(uid, {"xp": 0, "level": 0, "last_msg": 0})
         now = time.time()
@@ -771,7 +781,7 @@ async def on_message(message: discord.Message):
                     f"🎉 {user.mention} reached **level {entry['level']}**!", delete_after=10
                 )
             levels[uid] = entry
-            await save_levels(session, guild, levels)
+            await save_levels(session, message.guild, levels)
 
     async def automod_action(action: str, reason: str):
         try:
@@ -936,11 +946,6 @@ async def hackban(interaction: discord.Interaction, user_id: str, reason: str = 
         await interaction.followup.send(f"❌ Failed: {ex}", ephemeral=True)
 
 
-@bot.tree.command(name="forceban", description="Alias for hackban - ban user by ID")
-@app_commands.describe(user_id="User ID to ban", reason="Reason")
-@is_mod()
-async def forceban(interaction: discord.Interaction, user_id: str, reason: str = "No reason"):
-    await hackban(interaction, user_id, reason)
 
 
 @bot.tree.command(name="softban", description="Ban and immediately unban to delete messages")
@@ -1260,11 +1265,6 @@ async def unmute(interaction: discord.Interaction, member: discord.Member, reaso
     await interaction.followup.send(f"✅ Unmuted **{member}** | Case #{case_id}", ephemeral=True)
 
 
-@bot.tree.command(name="tempmute", description="Temporarily mute a member (alias for /mute)")
-@app_commands.describe(member="Member to mute", duration="Duration", reason="Reason")
-@is_mod()
-async def tempmute(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason"):
-    await mute(interaction, member, duration, reason)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1283,8 +1283,8 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg      = await get_config(session, guild)
-        warnings = await get_warnings(session, guild)
+        cfg      = await get_config(session, interaction.guild)
+        warnings = await get_warnings(session, interaction.guild)
         uid      = str(member.id)
         if uid not in warnings:
             warnings[uid] = []
@@ -1297,7 +1297,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
             "points": points,
         }
         warnings[uid].append(warn_data)
-        await save_warnings(session, guild, warnings)
+        await save_warnings(session, interaction.guild, warnings)
         case_id = await add_case(session, guild, "warn", interaction.user, member, reason)
     
     total_points = sum(w.get("points", 1) for w in warnings[uid])
@@ -1368,7 +1368,7 @@ async def delwarn(interaction: discord.Interaction, member: discord.Member, warn
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, guild)
+        warns = await get_warnings(session, interaction.guild)
         user_warns = warns.get(str(member.id), [])
         
         if warn_number < 1 or warn_number > len(user_warns):
@@ -1377,7 +1377,7 @@ async def delwarn(interaction: discord.Interaction, member: discord.Member, warn
         
         removed = user_warns.pop(warn_number - 1)
         warns[str(member.id)] = user_warns
-        await save_warnings(session, guild, warns)
+        await save_warnings(session, interaction.guild, warns)
     
     await interaction.followup.send(f"✅ Removed warning #{warn_number} from **{member}**\nReason was: {removed['reason']}", ephemeral=True)
 
@@ -1389,9 +1389,9 @@ async def clearwarnings(interaction: discord.Interaction, member: discord.Member
     await interaction.response.defer(ephemeral=True)
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, guild)
+        warns = await get_warnings(session, interaction.guild)
         warns[str(member.id)] = []
-        await save_warnings(session, guild, warns)
+        await save_warnings(session, interaction.guild, warns)
     await interaction.followup.send(f"✅ Cleared all warnings for **{member}**", ephemeral=True)
 
 
@@ -1403,7 +1403,7 @@ async def editwarn(interaction: discord.Interaction, member: discord.Member, war
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        warns = await get_warnings(session, guild)
+        warns = await get_warnings(session, interaction.guild)
         user_warns = warns.get(str(member.id), [])
         
         if warn_number < 1 or warn_number > len(user_warns):
@@ -1412,7 +1412,7 @@ async def editwarn(interaction: discord.Interaction, member: discord.Member, war
         
         user_warns[warn_number - 1]["reason"] = new_reason
         warns[str(member.id)] = user_warns
-        await save_warnings(session, guild, warns)
+        await save_warnings(session, interaction.guild, warns)
     
     await interaction.followup.send(f"✅ Updated warning #{warn_number} for **{member}**\nNew reason: {new_reason}", ephemeral=True)
 
@@ -1464,13 +1464,13 @@ async def lock(interaction: discord.Interaction, channel: discord.abc.GuildChann
     await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         case_id = await add_case(session, guild, "lock", interaction.user, 
                                 type('Obj', (object,), {'id': channel.id, '__str__': lambda s: f"#{channel.name}"})(), reason)
         
-        locked = await get_locked_channels(session, guild)
+        locked = await get_locked_channels(session, interaction.guild)
         locked[str(channel.id)] = {"channel_name": channel.name, "reason": reason, "timestamp": datetime.datetime.utcnow().isoformat()}
-        await save_locked_channels(session, guild, locked)
+        await save_locked_channels(session, interaction.guild, locked)
     
     e = mod_embed(0xED4245, "Channel locked", [
         ("Channel", channel.mention, True),
@@ -1499,13 +1499,13 @@ async def unlock(interaction: discord.Interaction, channel: discord.abc.GuildCha
     await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=reason)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         case_id = await add_case(session, guild, "unlock", interaction.user,
                                 type('Obj', (object,), {'id': channel.id, '__str__': lambda s: f"#{channel.name}"})(), reason)
         
-        locked = await get_locked_channels(session, guild)
+        locked = await get_locked_channels(session, interaction.guild)
         locked.pop(str(channel.id), None)
-        await save_locked_channels(session, guild, locked)
+        await save_locked_channels(session, interaction.guild, locked)
     
     e = mod_embed(0x57F287, "Channel unlocked", [
         ("Channel", channel.mention, True),
@@ -1525,8 +1525,8 @@ async def lockall(interaction: discord.Interaction, reason: str = "Server lockdo
     locked_count = 0
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        locked = await get_locked_channels(session, guild)
+        cfg = await get_config(session, interaction.guild)
+        locked = await get_locked_channels(session, interaction.guild)
         
         for channel in interaction.guild.text_channels:
             try:
@@ -1538,7 +1538,7 @@ async def lockall(interaction: discord.Interaction, reason: str = "Server lockdo
             except:
                 pass
         
-        await save_locked_channels(session, guild, locked)
+        await save_locked_channels(session, interaction.guild, locked)
         case_id = await add_case(session, guild, "lockall", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{locked_count} channels"})(), reason)
     
@@ -1554,8 +1554,8 @@ async def unlockall(interaction: discord.Interaction, reason: str = "Unlocking s
     unlocked_count = 0
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        locked = await get_locked_channels(session, guild)
+        cfg = await get_config(session, interaction.guild)
+        locked = await get_locked_channels(session, interaction.guild)
         
         for channel_id in list(locked.keys()):
             channel = interaction.guild.get_channel(int(channel_id))
@@ -1568,7 +1568,7 @@ async def unlockall(interaction: discord.Interaction, reason: str = "Unlocking s
                 except:
                     pass
         
-        await save_locked_channels(session, guild, {})
+        await save_locked_channels(session, interaction.guild, {})
         case_id = await add_case(session, guild, "unlockall", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: f"{unlocked_count} channels"})(), reason)
     
@@ -1898,7 +1898,7 @@ async def quarantine(interaction: discord.Interaction, member: discord.Member, r
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
     
     quarantine_role_id = cfg.get("quarantine_role")
     if not quarantine_role_id:
@@ -1921,17 +1921,17 @@ async def quarantine(interaction: discord.Interaction, member: discord.Member, r
         return
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         case_id = await add_case(session, guild, "quarantine", interaction.user, member, reason)
         
         # Store old roles for later restoration
-        all_locked, _ = await gh_read(session, FILE_LOCKED, guild_branch(interaction.guild))
+        all_locked, _ = await gh_read(session, FILE_LOCKED, guild_branch_from_id(guild_id))
         if not all_locked:
             all_locked = {}
         if "quarantine_roles" not in all_locked:
             all_locked["quarantine_roles"] = {}
         all_locked["quarantine_roles"][str(member.id)] = old_roles
-        await gh_write(session, FILE_LOCKED, all_locked, None, "Store quarantine roles", guild_branch(interaction.guild))
+        await gh_write(session, FILE_LOCKED, all_locked, None, "Store quarantine roles", guild_branch_from_id(guild_id))
     
     e = mod_embed(0x9B59B6, "Member quarantined", [
         ("User", f"{member} ({member.id})", True),
@@ -1950,14 +1950,14 @@ async def unquarantine(interaction: discord.Interaction, member: discord.Member,
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         
         # Get stored roles
-        all_locked, _ = await gh_read(session, FILE_LOCKED, guild_branch(interaction.guild))
+        all_locked, _ = await gh_read(session, FILE_LOCKED, guild_branch_from_id(guild_id))
         stored_roles = []
         if all_locked and "quarantine_roles" in all_locked:
             stored_roles = all_locked["quarantine_roles"].pop(str(member.id), [])
-            await gh_write(session, FILE_LOCKED, all_locked, None, "Restore quarantine roles", guild_branch(interaction.guild))
+            await gh_write(session, FILE_LOCKED, all_locked, None, "Restore quarantine roles", guild_branch_from_id(guild_id))
     
     # Remove quarantine role
     quarantine_role_id = cfg.get("quarantine_role")
@@ -1991,9 +1991,9 @@ async def raidmode_cmd(interaction: discord.Interaction, enabled: bool):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["raid_mode"] = enabled
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
         
         case_id = await add_case(session, guild, "raidmode", interaction.user,
                                 type('Obj', (object,), {'id': 0, '__str__': lambda s: "Server"})(),
@@ -2010,9 +2010,9 @@ async def panic(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["raid_mode"] = True
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
     
     # Lock all channels
     locked_count = 0
@@ -2043,11 +2043,11 @@ async def unpanic(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["raid_mode"] = False
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
         
-        await save_locked_channels(session, guild, {})
+        await save_locked_channels(session, interaction.guild, {})
     
     await interaction.followup.send("✅ Panic mode disabled. Use `/unlockall` to unlock channels.", ephemeral=True)
 
@@ -2206,22 +2206,10 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member = No
 
 
 # Aliases for userinfo
-@bot.tree.command(name="user", description="View user info (alias)")
-@app_commands.describe(member="Member to inspect")
-async def user_cmd(interaction: discord.Interaction, member: discord.Member = None):
-    await userinfo(interaction, member)
 
 
-@bot.tree.command(name="ui", description="View user info (alias)")
-@app_commands.describe(member="Member to inspect")
-async def ui_cmd(interaction: discord.Interaction, member: discord.Member = None):
-    await userinfo(interaction, member)
 
 
-@bot.tree.command(name="whois", description="View user info (alias)")
-@app_commands.describe(member="Member to inspect")
-async def whois_cmd(interaction: discord.Interaction, member: discord.Member = None):
-    await userinfo(interaction, member)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2334,19 +2322,10 @@ async def serverinfo(interaction: discord.Interaction):
 
 
 # Aliases for serverinfo
-@bot.tree.command(name="server", description="View server info (alias)")
-async def server_cmd(interaction: discord.Interaction):
-    await serverinfo(interaction)
 
 
-@bot.tree.command(name="guildinfo", description="View server info (alias)")
-async def guildinfo_cmd(interaction: discord.Interaction):
-    await serverinfo(interaction)
 
 
-@bot.tree.command(name="sinfo", description="View server info (alias)")
-async def sinfo_cmd(interaction: discord.Interaction):
-    await serverinfo(interaction)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2391,16 +2370,8 @@ async def avatar(interaction: discord.Interaction, member: discord.Member = None
 
 
 # Aliases for avatar
-@bot.tree.command(name="av", description="View avatar (alias)")
-@app_commands.describe(member="Member to view")
-async def av_cmd(interaction: discord.Interaction, member: discord.Member = None):
-    await avatar(interaction, member)
 
 
-@bot.tree.command(name="pfp", description="View avatar (alias)")
-@app_commands.describe(member="Member to view")
-async def pfp_cmd(interaction: discord.Interaction, member: discord.Member = None):
-    await avatar(interaction, member)
 
 
 @bot.tree.command(name="banner", description="View a user's banner")
@@ -2443,9 +2414,6 @@ async def icon(interaction: discord.Interaction):
     await interaction.response.send_message(embed=e)
 
 
-@bot.tree.command(name="servericon", description="View server icon (alias)")
-async def servericon_cmd(interaction: discord.Interaction):
-    await icon(interaction)
 
 
 @bot.tree.command(name="splash", description="View server splash image")
@@ -2572,10 +2540,6 @@ async def roleinfo(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.send_message(embed=e)
 
 
-@bot.tree.command(name="role", description="View role info (alias)")
-@app_commands.describe(role="Role to view")
-async def role_cmd(interaction: discord.Interaction, role: discord.Role):
-    await roleinfo(interaction, role)
 
 
 @bot.tree.command(name="roles", description="List all server roles with member counts")
@@ -2599,9 +2563,6 @@ async def roles(interaction: discord.Interaction):
     await interaction.response.send_message(embed=e)
 
 
-@bot.tree.command(name="rolelist", description="List all roles with member counts (alias)")
-async def rolelist_cmd(interaction: discord.Interaction):
-    await roles(interaction)
 
 
 @bot.tree.command(name="inrole", description="Show members with a specific role")
@@ -2627,10 +2588,6 @@ async def inrole(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.send_message(embed=e)
 
 
-@bot.tree.command(name="members", description="Show members with a role (alias)")
-@app_commands.describe(role="Role to check")
-async def members_cmd(interaction: discord.Interaction, role: discord.Role):
-    await inrole(interaction, role)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2707,8 +2664,8 @@ async def history(interaction: discord.Interaction, member: discord.Member):
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, guild)
-        warnings = await get_warnings(session, guild)
+        all_cases = await get_cases(session, interaction.guild)
+        warnings = await get_warnings(session, interaction.guild)
     
     # Filter cases for this user
     user_cases = [c for c in all_cases if c.get("target_id") == str(member.id)]
@@ -2745,11 +2702,6 @@ async def history(interaction: discord.Interaction, member: discord.Member):
     await interaction.followup.send(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="modhistory", description="View moderation history (alias)")
-@app_commands.describe(member="Member to check")
-@is_mod()
-async def modhistory_cmd(interaction: discord.Interaction, member: discord.Member):
-    await history(interaction, member)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2798,7 +2750,7 @@ async def case_cmd(interaction: discord.Interaction, case_id: int, action: str =
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, guild)
+        all_cases = await get_cases(session, interaction.guild)
         
         case = next((c for c in all_cases if c.get("id") == case_id), None)
         
@@ -2816,12 +2768,12 @@ async def case_cmd(interaction: discord.Interaction, case_id: int, action: str =
         
         elif action == "edit" and new_reason:
             case["reason"] = new_reason
-            await save_cases(session, guild, all_cases)
+            await save_cases(session, interaction.guild, all_cases)
             await interaction.followup.send(f"✅ Case #{case_id} reason updated to: {new_reason}", ephemeral=True)
         
         elif action == "delete":
             all_cases.remove(case)
-            await save_cases(session, guild, all_cases)
+            await save_cases(session, interaction.guild, all_cases)
             await interaction.followup.send(f"✅ Case #{case_id} deleted.", ephemeral=True)
         
         elif action == "pardon":
@@ -2829,145 +2781,12 @@ async def case_cmd(interaction: discord.Interaction, case_id: int, action: str =
             case["pardoned"] = True
             case["pardoned_by"] = str(interaction.user)
             case["pardoned_at"] = datetime.datetime.utcnow().isoformat()
-            await save_cases(session, guild, all_cases)
+            await save_cases(session, interaction.guild, all_cases)
             await interaction.followup.send(f"✅ Case #{case_id} has been pardoned.", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HONEYPOT
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="honeypot_add", description="Mark a channel as a honeypot trap")
-@app_commands.describe(
-    channel="Channel to mark as honeypot",
-    warning_message="Custom warning message (optional)"
-)
-@is_admin()
-async def honeypot_add(interaction: discord.Interaction, channel: discord.TextChannel, warning_message: str = None):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        all_hp, sha = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
-        if not all_hp:
-            all_hp = {}
-        if guild_id not in all_hp:
-            all_hp[guild_id] = {}
-        all_hp[guild_id][str(channel.id)] = True
-        await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: add honeypot {channel.id}", guild_branch(interaction.guild))
-    
-    # Send warning message in the honeypot channel
-    default_warning = (
-        "🚨 **ATTENTION: This is a bot trap**\n\n"
-        "**DO NOT post anything here.** You will be banned.\n"
-        "This channel is for catching compromised accounts and malicious bots only."
-    )
-    
-    warning = warning_message or default_warning
-    
-    e = discord.Embed(
-        title="⛔ Bot Trap Active",
-        description=warning,
-        color=0xFF0000,
-        timestamp=datetime.datetime.utcnow()
-    )
-    e.set_footer(text="Vortex Security")
-    
-    try:
-        await channel.send(embed=e)
-    except Exception:
-        pass
-    
-    await interaction.followup.send(
-        f"🍯 **{channel.name}** is now a honeypot!\n"
-        f"• Users who message here will be kicked\n"
-        f"• Their messages from last 24h will be deleted\n"
-        f"• Mods/Admins are automatically protected\n"
-        f"• Use `/honeypot_protect` to add more protected roles",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="honeypot_protect", description="Add a role to honeypot protection (immune to honeypot)")
-@app_commands.describe(role="Role to protect from honeypot")
-@is_admin()
-async def honeypot_protect(interaction: discord.Interaction, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        protected = cfg.get("honeypot_protected_roles", [])
-        if str(role.id) not in protected:
-            protected.append(str(role.id))
-            cfg["honeypot_protected_roles"] = protected
-            await save_config(session, guild, cfg)
-            await interaction.followup.send(f"✅ **{role.name}** is now protected from honeypot.", ephemeral=True)
-        else:
-            await interaction.followup.send(f"⚠️ **{role.name}** is already protected.", ephemeral=True)
-
-
-@bot.tree.command(name="honeypot_unprotect", description="Remove a role from honeypot protection")
-@app_commands.describe(role="Role to remove from protection")
-@is_admin()
-async def honeypot_unprotect(interaction: discord.Interaction, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        protected = cfg.get("honeypot_protected_roles", [])
-        if str(role.id) in protected:
-            protected.remove(str(role.id))
-            cfg["honeypot_protected_roles"] = protected
-            await save_config(session, guild, cfg)
-            await interaction.followup.send(f"✅ **{role.name}** is no longer protected from honeypot.", ephemeral=True)
-        else:
-            await interaction.followup.send(f"⚠️ **{role.name}** was not protected.", ephemeral=True)
-
-
-@bot.tree.command(name="honeypot_remove", description="Remove a honeypot channel")
-@app_commands.describe(channel="Channel to remove from honeypots")
-@is_admin()
-async def honeypot_remove(interaction: discord.Interaction, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    async with aiohttp.ClientSession() as session:
-        all_hp, sha = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
-        if all_hp and guild_id in all_hp:
-            all_hp[guild_id].pop(str(channel.id), None)
-            await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: remove honeypot {channel.id}", guild_branch(interaction.guild))
-    await interaction.followup.send(f"✅ **{channel.name}** is no longer a honeypot.", ephemeral=True)
-
-
-@bot.tree.command(name="honeypot_list", description="List all honeypot channels")
-@is_admin()
-async def honeypot_list(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        all_hp, _ = await gh_read(session, FILE_HONEYPOT, guild_branch(interaction.guild))
-    
-    guild_hp = all_hp.get(guild_id, {}) if all_hp else {}
-    
-    e = discord.Embed(title="🍯 Honeypot Channels", color=0xFF6B35)
-    
-    if not guild_hp:
-        e.description = "No honeypot channels configured."
-    else:
-        channels = []
-        for ch_id in guild_hp.keys():
-            ch = interaction.guild.get_channel(int(ch_id))
-            if ch:
-                channels.append(ch.mention)
-        e.description = "\n".join(channels) or "No valid channels"
-    
-    await interaction.followup.send(embed=e, ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TICKETS
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TicketCloseView(discord.ui.View):
@@ -2994,7 +2813,7 @@ class TicketOpenView(discord.ui.View):
         guild    = interaction.guild
         guild_id = str(guild.id)
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, guild)
+            cfg = await get_config(session, interaction.guild)
         cat_id = cfg.get("ticket_category")
         category = guild.get_channel(int(cat_id)) if cat_id else None
 
@@ -3029,65 +2848,6 @@ class TicketOpenView(discord.ui.View):
         await interaction.followup.send(f"✅ Ticket opened: {ch.mention}", ephemeral=True)
 
 
-@bot.tree.command(name="ticket_setup", description="Post the ticket open panel")
-@app_commands.describe(channel="Channel to post the panel in")
-@is_admin()
-async def ticket_setup(interaction: discord.Interaction, channel: discord.TextChannel):
-    e = discord.Embed(
-        title="🎟️ Support Tickets",
-        description="Click the button below to open a private support ticket with the mod team.",
-        color=0x5865F2,
-    )
-    await channel.send(embed=e, view=TicketOpenView())
-    await interaction.response.send_message(f"✅ Ticket panel posted in {channel.mention}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# REACTION ROLES
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="rxrole_add", description="Add a reaction role to a message")
-@app_commands.describe(message_id="Message ID", emoji="Emoji to react with", role="Role to assign")
-@is_admin()
-async def rxrole_add(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    async with aiohttp.ClientSession() as session:
-        all_rx, sha = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
-        if not all_rx:
-            all_rx = {}
-        if guild_id not in all_rx:
-            all_rx[guild_id] = {}
-        key = f"{message_id}:{emoji}"
-        all_rx[guild_id][key] = str(role.id)
-        await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: add rxrole {key}", guild_branch(interaction.guild))
-    try:
-        msg = await interaction.channel.fetch_message(int(message_id))
-        await msg.add_reaction(emoji)
-    except Exception:
-        pass
-    await interaction.followup.send(f"✅ Reaction role set: {emoji} → {role.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="rxrole_remove", description="Remove a reaction role")
-@app_commands.describe(message_id="Message ID", emoji="Emoji")
-@is_admin()
-async def rxrole_remove(interaction: discord.Interaction, message_id: str, emoji: str):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    async with aiohttp.ClientSession() as session:
-        all_rx, sha = await gh_read(session, FILE_RXROLES, guild_branch(interaction.guild))
-        if all_rx and guild_id in all_rx:
-            key = f"{message_id}:{emoji}"
-            all_rx[guild_id].pop(key, None)
-            await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: remove rxrole {key}", guild_branch(interaction.guild))
-    await interaction.followup.send(f"✅ Reaction role removed.", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GIVEAWAYS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @bot.tree.command(name="giveaway", description="Start a giveaway")
 @app_commands.describe(channel="Channel", duration="Duration in minutes", winners="Number of winners", prize="Prize")
 @is_mod()
@@ -3103,7 +2863,7 @@ async def giveaway(interaction: discord.Interaction, channel: discord.TextChanne
     await msg.add_reaction("🎉")
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        all_g, sha = await gh_read(session, FILE_GIVEAWAYS, guild_branch(interaction.guild))
+        all_g, sha = await gh_read(session, FILE_GIVEAWAYS, guild_branch_from_id(guild_id))
         if not all_g:
             all_g = {}
         if guild_id not in all_g:
@@ -3116,7 +2876,7 @@ async def giveaway(interaction: discord.Interaction, channel: discord.TextChanne
             "ends_at":     ends_at.isoformat(),
             "ended":       False,
         })
-        await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: new giveaway", guild_branch(interaction.guild))
+        await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: new giveaway", guild_branch_from_id(guild_id))
     await interaction.followup.send(f"✅ Giveaway started in {channel.mention}!", ephemeral=True)
 
 
@@ -3124,7 +2884,7 @@ async def giveaway(interaction: discord.Interaction, channel: discord.TextChanne
 async def check_giveaways():
     now = datetime.datetime.utcnow()
     async with aiohttp.ClientSession() as session:
-        all_g, sha = await gh_read(session, FILE_GIVEAWAYS, guild_branch(interaction.guild))
+        all_g, sha = await gh_read(session, FILE_GIVEAWAYS, guild_branch_from_id(guild_id))
         if not all_g:
             return
         changed = False
@@ -3156,7 +2916,7 @@ async def check_giveaways():
                     except Exception:
                         pass
         if changed:
-            await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: end giveaway", guild_branch(interaction.guild))
+            await gh_write(session, FILE_GIVEAWAYS, all_g, sha, "Vortex: end giveaway", guild_branch_from_id(guild_id))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3169,7 +2929,7 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
     member   = member or interaction.user
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        levels = await get_levels(session, guild)
+        levels = await get_levels(session, interaction.guild)
     entry = levels.get(str(member.id), {"xp": 0, "level": 0})
     xp_needed = (entry["level"] + 1) * 100
     e = discord.Embed(title=f"⭐ {member.display_name}'s rank", color=0xFFD700)
@@ -3186,7 +2946,7 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
 async def leaderboard(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        levels = await get_levels(session, guild)
+        levels = await get_levels(session, interaction.guild)
     sorted_users = sorted(levels.items(), key=lambda x: (x[1].get("level", 0), x[1].get("xp", 0)), reverse=True)[:10]
     e = discord.Embed(title="🏆 XP Leaderboard", color=0xFFD700)
     medals = ["🥇", "🥈", "🥉"]
@@ -3218,181 +2978,159 @@ async def poll(interaction: discord.Interaction, question: str, option1: str, op
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SETUP COMMANDS (admin)
+# SETUP COMMANDS — /setup group
 # ══════════════════════════════════════════════════════════════════════════════
 
-@bot.tree.command(name="setup_modlog", description="Set the mod log channel")
+class SetupGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="setup", description="Server setup commands")
+
+setup_group = SetupGroup()
+bot.tree.add_command(setup_group)
+
+@setup_group.command(name="modlog", description="Set the mod log channel")
 @app_commands.describe(channel="Channel for mod logs")
-@is_admin()
 async def setup_modlog(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["mod_log"] = str(channel.id)
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
     await interaction.followup.send(f"✅ Mod log set to {channel.mention}", ephemeral=True)
 
-
-@bot.tree.command(name="setup_welcome", description="Set the welcome channel and message")
-@app_commands.describe(channel="Welcome channel", message="Welcome message ({user} and {server} are placeholders)")
-@is_admin()
+@setup_group.command(name="welcome", description="Set the welcome channel and message")
+@app_commands.describe(channel="Welcome channel", message="Welcome message ({user} and {server} placeholders)")
 async def setup_welcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["welcome_channel"] = str(channel.id)
-        if message:
-            cfg["welcome_message"] = message
-        await save_config(session, guild, cfg)
+        if message: cfg["welcome_message"] = message
+        await save_config(session, interaction.guild, cfg)
     await interaction.followup.send(f"✅ Welcome channel set to {channel.mention}", ephemeral=True)
 
-
-@bot.tree.command(name="setup_tickets", description="Set the ticket category")
+@setup_group.command(name="tickets", description="Set the ticket category")
 @app_commands.describe(category="Category for ticket channels")
-@is_admin()
 async def setup_tickets(interaction: discord.Interaction, category: discord.CategoryChannel):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["ticket_category"] = str(category.id)
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
     await interaction.followup.send(f"✅ Ticket category set to **{category.name}**", ephemeral=True)
 
-
-@bot.tree.command(name="setup_muted", description="Set the muted role")
+@setup_group.command(name="muted", description="Set the muted role")
 @app_commands.describe(role="Muted role")
-@is_admin()
 async def setup_muted(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["muted_role"] = str(role.id)
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
     await interaction.followup.send(f"✅ Muted role set to {role.mention}", ephemeral=True)
 
-
-@bot.tree.command(name="setup_quarantine", description="Set the quarantine role")
+@setup_group.command(name="quarantine", description="Set the quarantine role")
 @app_commands.describe(role="Quarantine role")
-@is_admin()
-async def setup_quarantine(interaction: discord.Interaction, role: discord.Role):
+async def setup_quarantine_cmd(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
         cfg["quarantine_role"] = str(role.id)
-        await save_config(session, guild, cfg)
+        await save_config(session, interaction.guild, cfg)
     await interaction.followup.send(f"✅ Quarantine role set to {role.mention}", ephemeral=True)
 
-
-@bot.tree.command(name="setup_modrole", description="Add a moderator role")
+@setup_group.command(name="modrole", description="Add a moderator role")
 @app_commands.describe(role="Role to add as moderator")
-@is_admin()
 async def setup_modrole(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        mod_data = await get_mod_roles(session, guild)
-        if str(role.id) not in mod_data["mod_roles"]:
-            mod_data["mod_roles"].append(str(role.id))
-        await save_mod_roles(session, guild, mod_data)
+        mod_data = await get_mod_roles(session, interaction.guild)
+        if str(role.id) not in mod_data["mod_roles"]: mod_data["mod_roles"].append(str(role.id))
+        await save_mod_roles(session, interaction.guild, mod_data)
     await interaction.followup.send(f"✅ {role.mention} is now a moderator role.", ephemeral=True)
 
-
-@bot.tree.command(name="setup_adminrole", description="Add an admin role")
+@setup_group.command(name="adminrole", description="Add an admin role")
 @app_commands.describe(role="Role to add as admin")
-@is_admin()
 async def setup_adminrole(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        mod_data = await get_mod_roles(session, guild)
-        if str(role.id) not in mod_data["admin_roles"]:
-            mod_data["admin_roles"].append(str(role.id))
-        await save_mod_roles(session, guild, mod_data)
+        mod_data = await get_mod_roles(session, interaction.guild)
+        if str(role.id) not in mod_data["admin_roles"]: mod_data["admin_roles"].append(str(role.id))
+        await save_mod_roles(session, interaction.guild, mod_data)
     await interaction.followup.send(f"✅ {role.mention} is now an admin role.", ephemeral=True)
 
 
-@bot.tree.command(name="automod_setup", description="Configure automod rules")
-@app_commands.describe(
-    rule="Rule to configure",
-    enabled="Enable or disable",
-)
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTOMOD COMMANDS — /automod group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AutomodGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="automod", description="Automod configuration")
+
+automod_group = AutomodGroup()
+bot.tree.add_command(automod_group)
+
+@automod_group.command(name="setup", description="Enable or disable an automod rule")
+@app_commands.describe(rule="Rule to configure", enabled="Enable or disable")
 @app_commands.choices(rule=[
-    app_commands.Choice(name="spam",    value="spam"),
-    app_commands.Choice(name="caps",    value="caps"),
-    app_commands.Choice(name="links",   value="links"),
-    app_commands.Choice(name="words",   value="words"),
-    app_commands.Choice(name="invites", value="invites"),
-    app_commands.Choice(name="mentions",value="mentions"),
-    app_commands.Choice(name="emojis",  value="emojis"),
-    app_commands.Choice(name="newlines",value="newlines"),
-    app_commands.Choice(name="zalgo",   value="zalgo"),
+    app_commands.Choice(name="spam",     value="spam"),
+    app_commands.Choice(name="caps",     value="caps"),
+    app_commands.Choice(name="links",    value="links"),
+    app_commands.Choice(name="words",    value="words"),
+    app_commands.Choice(name="invites",  value="invites"),
+    app_commands.Choice(name="mentions", value="mentions"),
+    app_commands.Choice(name="emojis",   value="emojis"),
+    app_commands.Choice(name="newlines", value="newlines"),
+    app_commands.Choice(name="zalgo",    value="zalgo"),
 ])
-@is_admin()
 async def automod_setup(interaction: discord.Interaction, rule: str, enabled: bool):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        if "automod" not in cfg:
-            cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
-        if rule not in cfg["automod"]:
-            cfg["automod"][rule] = {"enabled": False}
+        cfg = await get_config(session, interaction.guild)
+        if "automod" not in cfg: cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
+        if rule not in cfg["automod"]: cfg["automod"][rule] = {"enabled": False}
         cfg["automod"][rule]["enabled"] = enabled
-        await save_config(session, guild, cfg)
-    status = "enabled ✅" if enabled else "disabled ❌"
-    await interaction.followup.send(f"Automod **{rule}** is now {status}", ephemeral=True)
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"Automod **{rule}** {'enabled ✅' if enabled else 'disabled ❌'}", ephemeral=True)
 
-
-@bot.tree.command(name="automod_words", description="Add/remove words from the blacklist")
-@app_commands.describe(action="add or remove", word="Word to add or remove")
-@app_commands.choices(action=[
-    app_commands.Choice(name="add",    value="add"),
-    app_commands.Choice(name="remove", value="remove"),
-])
-@is_admin()
+@automod_group.command(name="words", description="Add/remove words from the blacklist")
+@app_commands.describe(action="add or remove", word="Word")
+@app_commands.choices(action=[app_commands.Choice(name="add", value="add"), app_commands.Choice(name="remove", value="remove")])
 async def automod_words(interaction: discord.Interaction, action: str, word: str):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        if "automod" not in cfg:
-            cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
+        cfg = await get_config(session, interaction.guild)
+        if "automod" not in cfg: cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
         words = cfg["automod"].setdefault("words", {}).setdefault("blacklist", [])
-        if action == "add" and word not in words:
-            words.append(word.lower())
-        elif action == "remove" and word.lower() in words:
-            words.remove(word.lower())
-        await save_config(session, guild, cfg)
-    await interaction.followup.send(f"✅ Word `{word}` {action}ed to blacklist.", ephemeral=True)
+        if action == "add" and word not in words: words.append(word.lower())
+        elif action == "remove" and word.lower() in words: words.remove(word.lower())
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ Word `{word}` {action}ed.", ephemeral=True)
 
-
-@bot.tree.command(name="automod_links", description="Add/remove domains from link whitelist")
-@app_commands.describe(action="add or remove", domain="Domain to whitelist")
-@app_commands.choices(action=[
-    app_commands.Choice(name="add",    value="add"),
-    app_commands.Choice(name="remove", value="remove"),
-])
-@is_admin()
+@automod_group.command(name="links", description="Add/remove domains from link whitelist")
+@app_commands.describe(action="add or remove", domain="Domain")
+@app_commands.choices(action=[app_commands.Choice(name="add", value="add"), app_commands.Choice(name="remove", value="remove")])
 async def automod_links(interaction: discord.Interaction, action: str, domain: str):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        if "automod" not in cfg:
-            cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
+        cfg = await get_config(session, interaction.guild)
+        if "automod" not in cfg: cfg["automod"] = DEFAULT_CONFIG["automod"].copy()
         whitelist = cfg["automod"].setdefault("links", {}).setdefault("whitelist", [])
-        if action == "add" and domain not in whitelist:
-            whitelist.append(domain.lower())
-        elif action == "remove" and domain.lower() in whitelist:
-            whitelist.remove(domain.lower())
-        await save_config(session, guild, cfg)
-    await interaction.followup.send(f"✅ Domain `{domain}` {action}ed to whitelist.", ephemeral=True)
-
+        if action == "add" and domain not in whitelist: whitelist.append(domain.lower())
+        elif action == "remove" and domain.lower() in whitelist: whitelist.remove(domain.lower())
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ Domain `{domain}` {action}ed.", ephemeral=True)
 
 @bot.tree.command(name="ghostping", description="Check for recent ghost pings")
 @is_mod()
@@ -3430,13 +3168,527 @@ async def vortex_info(interaction: discord.Interaction):
     e.add_field(name="**Info Commands**", value="userinfo, serverinfo, avatar, banner, roleinfo, lookup", inline=False)
     e.add_field(name="**Automod**",      value="spam, caps, links, words, invites, mentions, emojis, zalgo", inline=False)
     e.add_field(name="**Other**",        value="tickets, giveaways, leveling, polls, reaction roles, honeypot", inline=False)
-    e.set_footer(text="Use /setup_modlog to get started!")
+    e.set_footer(text="Use /setup modlog to get started!")
     await interaction.response.send_message(embed=e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# HONEYPOT — /honeypot group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class HoneypotGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="honeypot", description="Honeypot channel management")
+honeypot_group = HoneypotGroup()
+bot.tree.add_command(honeypot_group)
+
+@honeypot_group.command(name="add", description="Mark a channel as a honeypot trap")
+@app_commands.describe(channel="Channel to mark as honeypot", action="Action when triggered")
+@app_commands.choices(action=[
+    app_commands.Choice(name="kick",value="kick"),
+    app_commands.Choice(name="ban", value="ban"),
+    app_commands.Choice(name="mute",value="mute"),
+])
+async def honeypot_add(interaction: discord.Interaction, channel: discord.TextChannel, action: str = "kick"):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        all_hp, sha = await gh_read(session, FILE_HONEYPOT, guild_branch_from_id(guild_id))
+        if not all_hp: all_hp = {}
+        if guild_id not in all_hp: all_hp[guild_id] = {}
+        all_hp[guild_id][str(channel.id)] = {"action": action}
+        await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: add honeypot {channel.id}", guild_branch_from_id(guild_id))
+    await interaction.followup.send(f"🍯 {channel.mention} is now a honeypot (action: {action})", ephemeral=True)
+
+@honeypot_group.command(name="remove", description="Remove a honeypot channel")
+@app_commands.describe(channel="Channel to remove from honeypot")
+async def honeypot_remove(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        all_hp, sha = await gh_read(session, FILE_HONEYPOT, guild_branch_from_id(guild_id))
+        if all_hp and guild_id in all_hp:
+            all_hp[guild_id].pop(str(channel.id), None)
+            await gh_write(session, FILE_HONEYPOT, all_hp, sha, f"Vortex: remove honeypot {channel.id}", guild_branch_from_id(guild_id))
+    await interaction.followup.send(f"✅ Removed honeypot from {channel.mention}", ephemeral=True)
+
+@honeypot_group.command(name="protect", description="Add a role immune to honeypot")
+@app_commands.describe(role="Role to protect")
+async def honeypot_protect(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        protected = cfg.get("honeypot_protected_roles", [])
+        if str(role.id) not in protected: protected.append(str(role.id))
+        cfg["honeypot_protected_roles"] = protected
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ {role.mention} is now protected from honeypot.", ephemeral=True)
+
+@honeypot_group.command(name="unprotect", description="Remove a role from honeypot protection")
+@app_commands.describe(role="Role to unprotect")
+async def honeypot_unprotect(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        protected = cfg.get("honeypot_protected_roles", [])
+        if str(role.id) in protected: protected.remove(str(role.id))
+        cfg["honeypot_protected_roles"] = protected
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ {role.mention} removed from honeypot protection.", ephemeral=True)
+
+@honeypot_group.command(name="list", description="List all honeypot channels")
+async def honeypot_list(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        all_hp, _ = await gh_read(session, FILE_HONEYPOT, guild_branch_from_id(guild_id))
+    guild_hp = (all_hp or {}).get(guild_id, {})
+    e = discord.Embed(title="🍯 Honeypot Channels", color=0xFF6B35)
+    if not guild_hp: e.description = "No honeypot channels."
+    else:
+        for ch_id, data in guild_hp.items():
+            ch = interaction.guild.get_channel(int(ch_id))
+            e.add_field(name=ch.mention if ch else ch_id, value=f"Action: {data.get('action','kick')}", inline=True)
+    await interaction.followup.send(embed=e, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REACTION ROLES — /rxrole group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RxRoleGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="rxrole", description="Reaction role management")
+rxrole_group = RxRoleGroup()
+bot.tree.add_command(rxrole_group)
+
+@rxrole_group.command(name="add", description="Add a reaction role to a message")
+@app_commands.describe(message_id="Message ID", emoji="Emoji", role="Role to assign")
+async def rxrole_add(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    key = f"{message_id}:{emoji}"
+    async with aiohttp.ClientSession() as session:
+        all_rx, sha = await gh_read(session, FILE_RXROLES, guild_branch_from_id(guild_id))
+        if not all_rx: all_rx = {}
+        if guild_id not in all_rx: all_rx[guild_id] = {}
+        all_rx[guild_id][key] = str(role.id)
+        await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: add rxrole {key}", guild_branch_from_id(guild_id))
+    try:
+        ch = interaction.channel
+        msg = await ch.fetch_message(int(message_id))
+        await msg.add_reaction(emoji)
+    except: pass
+    await interaction.followup.send(f"✅ Reaction role added: {emoji} → {role.mention}", ephemeral=True)
+
+@rxrole_group.command(name="remove", description="Remove a reaction role")
+@app_commands.describe(message_id="Message ID", emoji="Emoji")
+async def rxrole_remove(interaction: discord.Interaction, message_id: str, emoji: str):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    key = f"{message_id}:{emoji}"
+    async with aiohttp.ClientSession() as session:
+        all_rx, sha = await gh_read(session, FILE_RXROLES, guild_branch_from_id(guild_id))
+        if all_rx and guild_id in all_rx and key in all_rx[guild_id]:
+            del all_rx[guild_id][key]
+            await gh_write(session, FILE_RXROLES, all_rx, sha, f"Vortex: remove rxrole {key}", guild_branch_from_id(guild_id))
+    await interaction.followup.send(f"✅ Reaction role removed.", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TICKET COMMANDS — /ticket group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TicketGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="ticket", description="Ticket system")
+ticket_group = TicketGroup()
+bot.tree.add_command(ticket_group)
+
+@ticket_group.command(name="open", description="Create a support ticket")
+@app_commands.describe(reason="Reason for ticket")
+async def ticket_open(interaction: discord.Interaction, reason: str = None):
+    await TicketOpenView().open_ticket(interaction, None)
+
+@ticket_group.command(name="setup", description="Post the ticket open panel")
+async def ticket_setup_cmd(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    e = discord.Embed(title="🎫 Support Tickets", description="Click the button below to open a ticket.", color=0x5865F2)
+    await interaction.channel.send(embed=e, view=TicketOpenView())
+    await interaction.response.send_message("✅ Ticket panel posted.", ephemeral=True)
+
+@ticket_group.command(name="close", description="Close the current ticket")
+@app_commands.describe(reason="Close reason")
+async def ticket_close_cmd(interaction: discord.Interaction, reason: str = "No reason"):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    if not interaction.channel.name.startswith("ticket-"):
+        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True); return
+    await interaction.response.send_message(f"🔒 Closing ticket... Reason: {reason}")
+    await asyncio.sleep(3)
+    await interaction.channel.delete(reason=reason)
+
+@ticket_group.command(name="add", description="Add a user to the ticket")
+@app_commands.describe(user="User to add")
+async def ticket_add_cmd(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    if not interaction.channel.name.startswith("ticket-"):
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
+    await interaction.channel.set_permissions(user, overwrite=discord.PermissionOverwrite(view_channel=True, send_messages=True))
+    await interaction.response.send_message(f"✅ Added {user.mention}")
+
+@ticket_group.command(name="remove", description="Remove a user from the ticket")
+@app_commands.describe(user="User to remove")
+async def ticket_remove_cmd(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    if not interaction.channel.name.startswith("ticket-"):
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
+    await interaction.channel.set_permissions(user, overwrite=None)
+    await interaction.response.send_message(f"✅ Removed {user.mention}")
+
+@ticket_group.command(name="rename", description="Rename the current ticket")
+@app_commands.describe(name="New name")
+async def ticket_rename_cmd(interaction: discord.Interaction, name: str):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    if not interaction.channel.name.startswith("ticket-"):
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
+    await interaction.channel.edit(name=f"ticket-{name.lower().replace(' ', '-')}")
+    await interaction.response.send_message(f"✅ Renamed ticket.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CUSTOM COMMANDS / TAGS — /tag group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TagGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="tag", description="Custom tags / commands")
+tag_group = TagGroup()
+bot.tree.add_command(tag_group)
+
+@tag_group.command(name="use", description="Use a tag")
+@app_commands.describe(name="Tag name")
+async def tag_use(interaction: discord.Interaction, name: str):
+    guild_id = str(interaction.guild_id)
+    name = name.lower().replace(" ", "_")
+    async with aiohttp.ClientSession() as session:
+        cmds = await get_custom_cmds(session, guild_id)
+        if name in cmds:
+            cmds[name]["uses"] = cmds[name].get("uses", 0) + 1
+            await save_custom_cmds(session, guild_id, cmds)
+            await interaction.response.send_message(cmds[name]["response"])
+        else:
+            await interaction.response.send_message(f"❌ Tag `{name}` not found.", ephemeral=True)
+
+@tag_group.command(name="create", description="Create a tag")
+@app_commands.describe(name="Tag name", response="Tag content")
+async def tag_create(interaction: discord.Interaction, name: str, response: str):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    name = name.lower().replace(" ", "_")
+    async with aiohttp.ClientSession() as session:
+        cmds = await get_custom_cmds(session, guild_id)
+        cmds[name] = {"response": response, "created_by": str(interaction.user.id), "uses": 0}
+        await save_custom_cmds(session, guild_id, cmds)
+    await interaction.followup.send(f"✅ Tag `{name}` created.", ephemeral=True)
+
+@tag_group.command(name="delete", description="Delete a tag")
+@app_commands.describe(name="Tag name")
+async def tag_delete(interaction: discord.Interaction, name: str):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    name = name.lower().replace(" ", "_")
+    async with aiohttp.ClientSession() as session:
+        cmds = await get_custom_cmds(session, guild_id)
+        if name not in cmds: await interaction.followup.send(f"❌ Tag not found.", ephemeral=True); return
+        del cmds[name]
+        await save_custom_cmds(session, guild_id, cmds)
+    await interaction.followup.send(f"✅ Tag `{name}` deleted.", ephemeral=True)
+
+@tag_group.command(name="list", description="List all tags")
+async def tag_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        cmds = await get_custom_cmds(session, guild_id)
+    e = discord.Embed(title="📝 Tags", color=0x5865F2)
+    e.description = "\n".join(f"• `{n}` — uses: {d.get('uses',0)}" for n, d in cmds.items()) if cmds else "No tags."
+    await interaction.followup.send(embed=e, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VOICE — fold voice_lock/unlock/limit/bitrate into existing /voice
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTOROLE — add bots/delay as subcommands via choices on existing /autorole
+# Since /autorole is already a flat command, add two extra flat commands
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="stickyroles", description="Enable/disable sticky roles (re-assign on rejoin)")
+@app_commands.describe(enabled="Enable sticky roles")
+async def stickyroles_cmd(interaction: discord.Interaction, enabled: bool):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        cfg["sticky_roles"] = enabled
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ Sticky roles {'enabled' if enabled else 'disabled'}", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STARBOARD — /starboard group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class StarboardGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="starboard", description="Starboard management")
+starboard_group = StarboardGroup()
+bot.tree.add_command(starboard_group)
+
+@starboard_group.command(name="setup", description="Set up the starboard")
+@app_commands.describe(channel="Starboard channel", emoji="Emoji (default ⭐)", threshold="Required reactions")
+async def starboard_setup(interaction: discord.Interaction, channel: discord.TextChannel, emoji: str = "⭐", threshold: int = 3):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        sb = await get_starboard(session, guild_id)
+        sb.update({"channel_id": str(channel.id), "emoji": emoji, "threshold": threshold, "enabled": True, "starred": {}})
+        await save_starboard(session, guild_id, sb)
+    await interaction.followup.send(f"✅ Starboard → {channel.mention} | {emoji} × {threshold}", ephemeral=True)
+
+@starboard_group.command(name="disable", description="Disable the starboard")
+async def starboard_disable(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        sb = await get_starboard(session, guild_id)
+        sb["enabled"] = False
+        await save_starboard(session, guild_id, sb)
+    await interaction.followup.send("✅ Starboard disabled", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEVEL ROLES — /levelrole group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LevelRoleGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="levelrole", description="Level role rewards")
+levelrole_group = LevelRoleGroup()
+bot.tree.add_command(levelrole_group)
+
+@levelrole_group.command(name="add", description="Add a role reward for a level")
+@app_commands.describe(level="Level", role="Role to give")
+async def levelrole_add(interaction: discord.Interaction, level: int, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        if "level_roles" not in cfg: cfg["level_roles"] = {}
+        cfg["level_roles"][str(level)] = str(role.id)
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ Level {level} → {role.mention}", ephemeral=True)
+
+@levelrole_group.command(name="remove", description="Remove a level role reward")
+@app_commands.describe(level="Level to remove")
+async def levelrole_remove(interaction: discord.Interaction, level: int):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        cfg.get("level_roles", {}).pop(str(level), None)
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ Removed level {level} role reward.", ephemeral=True)
+
+@levelrole_group.command(name="list", description="List all level role rewards")
+async def levelrole_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+    level_roles = cfg.get("level_roles", {})
+    e = discord.Embed(title="🎖 Level Role Rewards", color=0x5865F2)
+    if not level_roles: e.description = "No level roles set."
+    else:
+        e.description = "\n".join(f"Level {lvl}: <@&{rid}>" for lvl, rid in sorted(level_roles.items(), key=lambda x: int(x[0])))
+    await interaction.followup.send(embed=e, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BIRTHDAY — /birthday group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class BirthdayGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="birthday", description="Birthday system")
+birthday_group = BirthdayGroup()
+bot.tree.add_command(birthday_group)
+
+@birthday_group.command(name="set", description="Set your birthday")
+@app_commands.describe(day="Day (1-31)", month="Month (1-12)")
+async def birthday_set(interaction: discord.Interaction, day: int, month: int):
+    if day < 1 or day > 31 or month < 1 or month > 12:
+        await interaction.response.send_message("❌ Invalid date.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        bdays = await get_birthdays(session, guild_id)
+        bdays[str(interaction.user.id)] = {"day": day, "month": month}
+        await save_birthdays(session, guild_id, bdays)
+    await interaction.followup.send(f"🎂 Birthday set: **{day}/{month}**", ephemeral=True)
+
+@birthday_group.command(name="remove", description="Remove your birthday")
+async def birthday_remove(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        bdays = await get_birthdays(session, guild_id)
+        bdays.pop(str(interaction.user.id), None)
+        await save_birthdays(session, guild_id, bdays)
+    await interaction.followup.send("✅ Birthday removed.", ephemeral=True)
+
+@birthday_group.command(name="role", description="Set birthday announcement role")
+@app_commands.describe(role="Role to assign on birthday")
+async def birthday_role(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        bdays = await get_birthdays(session, guild_id)
+        bdays["birthday_role"] = str(role.id)
+        await save_birthdays(session, guild_id, bdays)
+    await interaction.followup.send(f"✅ Birthday role → {role.mention}", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REMINDERS — fold reminder_cancel into /reminders action param
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCHEDULED TASKS — /schedule group
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ScheduleGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="schedule", description="Scheduled actions")
+schedule_group = ScheduleGroup()
+bot.tree.add_command(schedule_group)
+
+@schedule_group.command(name="add", description="Schedule a moderation action")
+@app_commands.describe(action="Action", target="Target user/channel ID", time="Time (e.g. 1h, 1d)", reason="Reason")
+@app_commands.choices(action=[
+    app_commands.Choice(name="ban",    value="ban"),
+    app_commands.Choice(name="unban",  value="unban"),
+    app_commands.Choice(name="mute",   value="mute"),
+    app_commands.Choice(name="unmute", value="unmute"),
+    app_commands.Choice(name="kick",   value="kick"),
+    app_commands.Choice(name="lock",   value="lock"),
+    app_commands.Choice(name="unlock", value="unlock"),
+])
+async def schedule_add(interaction: discord.Interaction, action: str, target: str, time: str, reason: str = "Scheduled action"):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    td = parse_duration(time)
+    if td is None: await interaction.followup.send("❌ Invalid duration.", ephemeral=True); return
+    execute_time = discord.utils.utcnow() + td
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        tasks = await get_scheduled(session, guild_id)
+        task_id = str(int(discord.utils.utcnow().timestamp() * 1000))
+        tasks.append({"id": task_id, "action": action, "target": target, "reason": reason,
+                      "execute_time": execute_time.isoformat(), "created_by": str(interaction.user.id),
+                      "channel_id": str(interaction.channel_id)})
+        await save_scheduled(session, guild_id, tasks)
+    await interaction.followup.send(f"⏰ Scheduled **{action}** in **{format_timedelta(td)}** | Target: {target}", ephemeral=True)
+
+@schedule_group.command(name="list", description="List pending scheduled tasks")
+async def schedule_list(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        tasks = await get_scheduled(session, guild_id)
+    now = discord.utils.utcnow()
+    active = [t for t in tasks if datetime.datetime.fromisoformat(t['execute_time']) > now]
+    e = discord.Embed(title="⏰ Scheduled Tasks", color=0x5865F2)
+    if not active: e.description = "No scheduled tasks."
+    else:
+        for t in active[:10]:
+            ts = int(datetime.datetime.fromisoformat(t['execute_time']).timestamp())
+            e.add_field(name=f"{t['action'].upper()} — ID: {t['id'][-6:]}", value=f"Target: {t['target']}\n<t:{ts}:R>\n{t['reason'][:30]}", inline=False)
+    await interaction.followup.send(embed=e, ephemeral=True)
+
+@schedule_group.command(name="cancel", description="Cancel a scheduled task")
+@app_commands.describe(task_id="Last 6 characters of task ID")
+async def schedule_cancel(interaction: discord.Interaction, task_id: str):
+    if not interaction.user.guild_permissions.moderate_members: await interaction.response.send_message("❌ Mod only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    async with aiohttp.ClientSession() as session:
+        tasks = await get_scheduled(session, guild_id)
+        idx = next((i for i, t in enumerate(tasks) if t['id'].endswith(task_id)), None)
+        if idx is None: await interaction.followup.send("❌ Task not found.", ephemeral=True); return
+        del tasks[idx]
+        await save_scheduled(session, guild_id, tasks)
+    await interaction.followup.send("✅ Task cancelled.", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INVITES — fold invite_create/delete into /invites action
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MISC COMMANDS THAT WERE REMOVED — restore as flat commands
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="autopublish", description="Enable/disable auto-publish in an announcement channel")
+@app_commands.describe(channel="Announcement channel", enabled="Enable or disable")
+async def autopublish_cmd(interaction: discord.Interaction, channel: discord.TextChannel, enabled: bool = True):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    if not channel.is_news(): await interaction.followup.send("❌ Must be an announcement channel.", ephemeral=True); return
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        cfg.setdefault("autopublish", {})[str(channel.id)] = enabled
+        await save_config(session, interaction.guild, cfg)
+    await interaction.followup.send(f"✅ Auto-publish {'enabled' if enabled else 'disabled'} in {channel.mention}", ephemeral=True)
+
+@bot.tree.command(name="verify_setup", description="Set up the verification system")
+@app_commands.describe(role="Verified role", channel="Channel for verification panel")
+async def verify_setup_cmd(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        cfg = await get_config(session, interaction.guild)
+        cfg["verified_role"] = str(role.id)
+        await save_config(session, interaction.guild, cfg)
+    e = discord.Embed(title="✅ Verification", description="Click the button below to verify yourself.", color=0x57F287)
+    await channel.send(embed=e, view=VerificationView())
+    await interaction.followup.send(f"✅ Verification panel posted in {channel.mention}", ephemeral=True)
+
+@bot.tree.command(name="deadban", description="Mass ban new/unverified accounts")
+@app_commands.describe(max_age_hours="Max account age in hours", require_avatar="Safe if they have avatar", reason="Ban reason")
+async def deadban_cmd(interaction: discord.Interaction, max_age_hours: int = 24, require_avatar: bool = True, reason: str = "Dead ban"):
+    if not interaction.user.guild_permissions.administrator: await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    now = datetime.datetime.utcnow()
+    banned = 0
+    for member in interaction.guild.members:
+        if member.bot or member.guild_permissions.administrator: continue
+        age_h = (now - member.created_at.replace(tzinfo=None)).total_seconds() / 3600
+        if age_h < max_age_hours:
+            if require_avatar and member.avatar: continue
+            try: await member.ban(reason=reason); banned += 1
+            except: pass
+    await interaction.followup.send(f"🔨 Dead ban complete: **{banned}** banned.", ephemeral=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # BACKGROUND TASKS
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @tasks.loop(minutes=1)
 async def check_temp_actions():
@@ -3495,7 +3747,7 @@ FILE_CUSTOMCMDS = "customcmds.json"
 FILE_INVITES = "invites.json"
 
 async def get_reminders(session, guild_id: str = None) -> dict:
-    all_r, _ = await gh_read(session, FILE_REMINDERS, guild_branch(interaction.guild))
+    all_r, _ = await gh_read(session, FILE_REMINDERS, guild_branch_from_id(guild_id))
     if not all_r:
         return {}
     if guild_id:
@@ -3503,50 +3755,50 @@ async def get_reminders(session, guild_id: str = None) -> dict:
     return all_r
 
 async def save_reminders(session, guild_id: str, reminders: dict):
-    all_r, sha = await gh_read(session, FILE_REMINDERS, guild_branch(interaction.guild))
+    all_r, sha = await gh_read(session, FILE_REMINDERS, guild_branch_from_id(guild_id))
     if not all_r:
         all_r = {}
     all_r[guild_id] = reminders
-    await gh_write(session, FILE_REMINDERS, all_r, sha, "Vortex: update reminders", guild_branch(interaction.guild))
+    await gh_write(session, FILE_REMINDERS, all_r, sha, "Vortex: update reminders", guild_branch_from_id(guild_id))
 
 async def get_scheduled(session, guild_id: str) -> list:
-    all_s, _ = await gh_read(session, FILE_SCHEDULED, guild_branch(interaction.guild))
+    all_s, _ = await gh_read(session, FILE_SCHEDULED, guild_branch_from_id(guild_id))
     if not all_s:
         return []
     return all_s.get(guild_id, [])
 
 async def save_scheduled(session, guild_id: str, tasks: list):
-    all_s, sha = await gh_read(session, FILE_SCHEDULED, guild_branch(interaction.guild))
+    all_s, sha = await gh_read(session, FILE_SCHEDULED, guild_branch_from_id(guild_id))
     if not all_s:
         all_s = {}
     all_s[guild_id] = tasks
-    await gh_write(session, FILE_SCHEDULED, all_s, sha, "Vortex: update scheduled", guild_branch(interaction.guild))
+    await gh_write(session, FILE_SCHEDULED, all_s, sha, "Vortex: update scheduled", guild_branch_from_id(guild_id))
 
 async def get_custom_cmds(session, guild_id: str) -> dict:
-    all_c, _ = await gh_read(session, FILE_CUSTOMCMDS, guild_branch(interaction.guild))
+    all_c, _ = await gh_read(session, FILE_CUSTOMCMDS, guild_branch_from_id(guild_id))
     if not all_c:
         return {}
     return all_c.get(guild_id, {})
 
 async def save_custom_cmds(session, guild_id: str, cmds: dict):
-    all_c, sha = await gh_read(session, FILE_CUSTOMCMDS, guild_branch(interaction.guild))
+    all_c, sha = await gh_read(session, FILE_CUSTOMCMDS, guild_branch_from_id(guild_id))
     if not all_c:
         all_c = {}
     all_c[guild_id] = cmds
-    await gh_write(session, FILE_CUSTOMCMDS, all_c, sha, "Vortex: update custom commands", guild_branch(interaction.guild))
+    await gh_write(session, FILE_CUSTOMCMDS, all_c, sha, "Vortex: update custom commands", guild_branch_from_id(guild_id))
 
 async def get_invites(session, guild_id: str) -> dict:
-    all_i, _ = await gh_read(session, FILE_INVITES, guild_branch(interaction.guild))
+    all_i, _ = await gh_read(session, FILE_INVITES, guild_branch_from_id(guild_id))
     if not all_i:
         return {}
     return all_i.get(guild_id, {})
 
 async def save_invites(session, guild_id: str, invites: dict):
-    all_i, sha = await gh_read(session, FILE_INVITES, guild_branch(interaction.guild))
+    all_i, sha = await gh_read(session, FILE_INVITES, guild_branch_from_id(guild_id))
     if not all_i:
         all_i = {}
     all_i[guild_id] = invites
-    await gh_write(session, FILE_INVITES, all_i, sha, "Vortex: update invites", guild_branch(interaction.guild))
+    await gh_write(session, FILE_INVITES, all_i, sha, "Vortex: update invites", guild_branch_from_id(guild_id))
 
 
 @bot.tree.command(name="remind", description="Set a reminder")
@@ -3601,36 +3853,6 @@ async def reminders_cmd(interaction: discord.Interaction):
     await interaction.followup.send(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="reminder_cancel", description="Cancel a reminder")
-@app_commands.describe(reminder_id="Last 6 characters of reminder ID")
-async def reminder_cancel(interaction: discord.Interaction, reminder_id: str):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        reminders = await get_reminders(session, guild_id)
-        
-        # Find reminder by partial ID
-        found_key = None
-        for k in reminders.keys():
-            if k.endswith(reminder_id):
-                found_key = k
-                break
-        
-        if not found_key:
-            await interaction.followup.send("❌ Reminder not found.", ephemeral=True)
-            return
-        
-        del reminders[found_key]
-        await save_reminders(session, guild_id, reminders)
-    
-    await interaction.followup.send("✅ Reminder cancelled.", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SCHEDULED TASKS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @bot.tree.command(name="schedule", description="Schedule an action")
 @app_commands.describe(
     action="Action to schedule",
@@ -3676,180 +3898,6 @@ async def schedule_cmd(interaction: discord.Interaction, action: str, target: st
     
     await interaction.followup.send(f"⏰ Scheduled **{action}** in **{format_timedelta(td)}**\nTarget: {target}\nReason: {reason}", ephemeral=True)
 
-
-@bot.tree.command(name="scheduled", description="List scheduled tasks")
-@is_mod()
-async def scheduled_list(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = await get_scheduled(session, guild_id)
-    
-    # Filter out expired tasks
-    now = discord.utils.utcnow()
-    active_tasks = [t for t in tasks if datetime.datetime.fromisoformat(t['execute_time']) > now]
-    
-    e = discord.Embed(title="⏰ Scheduled Tasks", color=0x5865F2)
-    
-    if not active_tasks:
-        e.description = "No scheduled tasks."
-    else:
-        for t in active_tasks[:10]:
-            exec_ts = int(datetime.datetime.fromisoformat(t['execute_time']).timestamp())
-            e.add_field(
-                name=f"{t['action'].upper()} - ID: {t['id'][-6:]}",
-                value=f"Target: {t['target']}\n⏰ <t:{exec_ts}:R>\nReason: {t['reason'][:30]}",
-                inline=False
-            )
-    
-    await interaction.followup.send(embed=e, ephemeral=True)
-
-
-@bot.tree.command(name="scheduled_cancel", description="Cancel a scheduled task")
-@app_commands.describe(task_id="Last 6 characters of task ID")
-@is_mod()
-async def scheduled_cancel(interaction: discord.Interaction, task_id: str):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = await get_scheduled(session, guild_id)
-        
-        # Find task by partial ID
-        found_idx = None
-        for i, t in enumerate(tasks):
-            if t['id'].endswith(task_id):
-                found_idx = i
-                break
-        
-        if found_idx is None:
-            await interaction.followup.send("❌ Task not found.", ephemeral=True)
-            return
-        
-        del tasks[found_idx]
-        await save_scheduled(session, guild_id, tasks)
-    
-    await interaction.followup.send("✅ Scheduled task cancelled.", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CUSTOM COMMANDS / TAGS
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="custom", description="Create a custom command")
-@app_commands.describe(name="Command name", response="Response content")
-@is_mod()
-async def custom_add(interaction: discord.Interaction, name: str, response: str):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    name = name.lower().replace(" ", "_")
-    
-    async with aiohttp.ClientSession() as session:
-        cmds = await get_custom_cmds(session, guild_id)
-        cmds[name] = {
-            "response": response,
-            "created_by": str(interaction.user.id),
-            "created_at": datetime.datetime.utcnow().isoformat(),
-            "uses": 0,
-        }
-        await save_custom_cmds(session, guild_id, cmds)
-    
-    await interaction.followup.send(f"✅ Created custom command `/{name}`", ephemeral=True)
-
-
-@bot.tree.command(name="custom_edit", description="Edit a custom command")
-@app_commands.describe(name="Command name", response="New response")
-@is_mod()
-async def custom_edit(interaction: discord.Interaction, name: str, response: str):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    name = name.lower().replace(" ", "_")
-    
-    async with aiohttp.ClientSession() as session:
-        cmds = await get_custom_cmds(session, guild_id)
-        if name not in cmds:
-            await interaction.followup.send(f"❌ Command `{name}` not found.", ephemeral=True)
-            return
-        cmds[name]["response"] = response
-        await save_custom_cmds(session, guild_id, cmds)
-    
-    await interaction.followup.send(f"✅ Updated command `/{name}`", ephemeral=True)
-
-
-@bot.tree.command(name="custom_delete", description="Delete a custom command")
-@app_commands.describe(name="Command name")
-@is_mod()
-async def custom_delete(interaction: discord.Interaction, name: str):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    name = name.lower().replace(" ", "_")
-    
-    async with aiohttp.ClientSession() as session:
-        cmds = await get_custom_cmds(session, guild_id)
-        if name not in cmds:
-            await interaction.followup.send(f"❌ Command `{name}` not found.", ephemeral=True)
-            return
-        del cmds[name]
-        await save_custom_cmds(session, guild_id, cmds)
-    
-    await interaction.followup.send(f"✅ Deleted command `/{name}`", ephemeral=True)
-
-
-@bot.tree.command(name="custom_list", description="List all custom commands")
-async def custom_list(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cmds = await get_custom_cmds(session, guild_id)
-    
-    e = discord.Embed(title="📝 Custom Commands", color=0x5865F2)
-    
-    if not cmds:
-        e.description = "No custom commands."
-    else:
-        cmd_list = [f"• `/{name}` - Uses: {data.get('uses', 0)}" for name, data in cmds.items()]
-        e.description = "\n".join(cmd_list[:25])
-    
-    await interaction.followup.send(embed=e, ephemeral=True)
-
-
-# Tag aliases
-@bot.tree.command(name="tag", description="Use or manage tags")
-@app_commands.describe(name="Tag name")
-async def tag_cmd(interaction: discord.Interaction, name: str):
-    guild_id = str(interaction.guild_id)
-    name = name.lower().replace(" ", "_")
-    
-    async with aiohttp.ClientSession() as session:
-        cmds = await get_custom_cmds(session, guild_id)
-        if name in cmds:
-            cmds[name]["uses"] = cmds[name].get("uses", 0) + 1
-            await save_custom_cmds(session, guild_id, cmds)
-            await interaction.response.send_message(cmds[name]["response"])
-        else:
-            await interaction.response.send_message(f"❌ Tag `{name}` not found.", ephemeral=True)
-
-
-@bot.tree.command(name="tag_create", description="Create a tag")
-@app_commands.describe(name="Tag name", content="Tag content")
-@is_mod()
-async def tag_create(interaction: discord.Interaction, name: str, content: str):
-    await custom_add(interaction, name, content)
-
-
-@bot.tree.command(name="tag_delete", description="Delete a tag")
-@app_commands.describe(name="Tag name")
-@is_mod()
-async def tag_delete(interaction: discord.Interaction, name: str):
-    await custom_delete(interaction, name)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INVITE MANAGEMENT
-# ══════════════════════════════════════════════════════════════════════════════
 
 @bot.event
 async def on_invite_create(invite):
@@ -3918,101 +3966,6 @@ async def invitelist_cmd(interaction: discord.Interaction):
     
     await interaction.followup.send(embed=e, ephemeral=True)
 
-
-@bot.tree.command(name="invite_create", description="Create an invite")
-@app_commands.describe(channel="Channel for invite", max_uses="Max uses (0 = unlimited)", max_age="Max age in seconds (0 = never)")
-@is_mod()
-async def invite_create(interaction: discord.Interaction, channel: discord.abc.GuildChannel = None, max_uses: int = 0, max_age: int = 0):
-    channel = channel or interaction.channel
-    
-    if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
-        await interaction.response.send_message("❌ Invalid channel type.", ephemeral=True)
-        return
-    
-    invite = await channel.create_invite(max_uses=max_uses or None, max_age=max_age or None)
-    await interaction.response.send_message(f"✅ Created invite: {invite.url}")
-
-
-@bot.tree.command(name="invite_delete", description="Delete an invite")
-@app_commands.describe(code="Invite code")
-@is_mod()
-async def invite_delete(interaction: discord.Interaction, code: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    invites = await interaction.guild.invites()
-    for inv in invites:
-        if inv.code == code:
-            await inv.delete()
-            await interaction.followup.send(f"✅ Deleted invite `{code}`", ephemeral=True)
-            return
-    
-    await interaction.followup.send(f"❌ Invite `{code}` not found.", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ENHANCED TICKET SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="ticket", description="Create a support ticket")
-@app_commands.describe(reason="Reason for ticket")
-async def ticket_create_cmd(interaction: discord.Interaction, reason: str = None):
-    # Use existing ticket open logic
-    await TicketOpenView().open_ticket(interaction, None)
-
-
-@bot.tree.command(name="ticket_close", description="Close current ticket")
-@app_commands.describe(reason="Close reason")
-@is_mod()
-async def ticket_close_cmd(interaction: discord.Interaction, reason: str = "No reason"):
-    if not interaction.channel.name.startswith("ticket-"):
-        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
-        return
-    
-    await interaction.response.send_message(f"🔒 Closing ticket... Reason: {reason}")
-    await asyncio.sleep(3)
-    await interaction.channel.delete(reason=reason)
-
-
-@bot.tree.command(name="ticket_add", description="Add a user to ticket")
-@app_commands.describe(user="User to add")
-@is_mod()
-async def ticket_add_cmd(interaction: discord.Interaction, user: discord.Member):
-    if not interaction.channel.name.startswith("ticket-"):
-        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
-        return
-    
-    overwrite = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-    await interaction.channel.set_permissions(user, overwrite=overwrite)
-    await interaction.response.send_message(f"✅ Added {user.mention} to ticket.")
-
-
-@bot.tree.command(name="ticket_remove", description="Remove a user from ticket")
-@app_commands.describe(user="User to remove")
-@is_mod()
-async def ticket_remove_cmd(interaction: discord.Interaction, user: discord.Member):
-    if not interaction.channel.name.startswith("ticket-"):
-        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
-        return
-    
-    await interaction.channel.set_permissions(user, overwrite=None)
-    await interaction.response.send_message(f"✅ Removed {user.mention} from ticket.")
-
-
-@bot.tree.command(name="ticket_rename", description="Rename ticket")
-@app_commands.describe(name="New name")
-@is_mod()
-async def ticket_rename_cmd(interaction: discord.Interaction, name: str):
-    if not interaction.channel.name.startswith("ticket-"):
-        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
-        return
-    
-    await interaction.channel.edit(name=f"ticket-{name.lower().replace(' ', '-')}")
-    await interaction.response.send_message(f"✅ Renamed ticket to {interaction.channel.name}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# EMBED BUILDER
-# ══════════════════════════════════════════════════════════════════════════════
 
 @bot.tree.command(name="embed", description="Send an embed")
 @app_commands.describe(
@@ -4241,46 +4194,6 @@ async def voice_cmd(interaction: discord.Interaction, action: str, member: disco
         await interaction.followup.send(f"✅ Undeafened **{member}**.", ephemeral=True)
 
 
-@bot.tree.command(name="voice_lock", description="Lock a voice channel")
-@app_commands.describe(channel="Channel to lock")
-@is_mod()
-async def voice_lock_cmd(interaction: discord.Interaction, channel: discord.VoiceChannel):
-    overwrite = channel.overwrites_for(interaction.guild.default_role)
-    overwrite.connect = False
-    await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-    await interaction.response.send_message(f"🔒 Locked {channel.mention}")
-
-
-@bot.tree.command(name="voice_unlock", description="Unlock a voice channel")
-@app_commands.describe(channel="Channel to unlock")
-@is_mod()
-async def voice_unlock_cmd(interaction: discord.Interaction, channel: discord.VoiceChannel):
-    overwrite = channel.overwrites_for(interaction.guild.default_role)
-    overwrite.connect = None
-    await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-    await interaction.response.send_message(f"🔓 Unlocked {channel.mention}")
-
-
-@bot.tree.command(name="voice_limit", description="Set voice channel user limit")
-@app_commands.describe(channel="Voice channel", limit="User limit (0 for unlimited)")
-@is_mod()
-async def voice_limit_cmd(interaction: discord.Interaction, channel: discord.VoiceChannel, limit: int):
-    await channel.edit(user_limit=limit)
-    await interaction.response.send_message(f"✅ Set {channel.mention} limit to **{limit or 'unlimited'}**")
-
-
-@bot.tree.command(name="voice_bitrate", description="Set voice channel bitrate")
-@app_commands.describe(channel="Voice channel", bitrate="Bitrate in kbps")
-@is_mod()
-async def voice_bitrate_cmd(interaction: discord.Interaction, channel: discord.VoiceChannel, bitrate: int):
-    await channel.edit(bitrate=bitrate * 1000)
-    await interaction.response.send_message(f"✅ Set {channel.mention} bitrate to **{bitrate}kbps**")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PERMISSION COMMANDS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @bot.tree.command(name="perms", description="Check user permissions")
 @app_commands.describe(member="Member to check")
 async def perms_cmd(interaction: discord.Interaction, member: discord.Member = None):
@@ -4299,23 +4212,6 @@ async def perms_cmd(interaction: discord.Interaction, member: discord.Member = N
     await interaction.response.send_message(embed=e)
 
 
-@bot.tree.command(name="perms_check", description="Check if user has specific permission")
-@app_commands.describe(member="Member to check", permission="Permission name")
-@is_mod()
-async def perms_check_cmd(interaction: discord.Interaction, member: discord.Member, permission: str):
-    perms = member.guild_permissions
-    perm_name = permission.lower().replace(" ", "_")
-    
-    has_perm = getattr(perms, perm_name, None) or perms.administrator
-    
-    status = "✅ Has permission" if has_perm else "❌ Does not have permission"
-    await interaction.response.send_message(f"**{member}** {status} `{permission}`")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SEARCH COMMANDS
-# ══════════════════════════════════════════════════════════════════════════════
-
 @bot.tree.command(name="search", description="Search cases")
 @app_commands.describe(
     user="Filter by user",
@@ -4328,7 +4224,7 @@ async def search_cmd(interaction: discord.Interaction, user: discord.Member = No
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        all_cases = await get_cases(session, guild)
+        all_cases = await get_cases(session, interaction.guild)
     
     results = all_cases
     
@@ -4453,62 +4349,62 @@ async def check_scheduled_tasks():
 # AUTOROLE SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
 
-FILE_AUTOROLE = f"autorole.json"
-FILE_STARBOARD = f"starboard.json"
-FILE_STICKYROLES = f"stickyroles.json"
-FILE_BIRTHDAYS = f"birthdays.json"
+FILE_AUTOROLE = f"{DATA_ROOT}/autorole.json"
+FILE_STARBOARD = f"{DATA_ROOT}/starboard.json"
+FILE_STICKYROLES = f"{DATA_ROOT}/stickyroles.json"
+FILE_BIRTHDAYS = f"{DATA_ROOT}/birthdays.json"
 
 async def get_autorole(session, guild_id: str) -> dict:
-    all_a, _ = await gh_read(session, FILE_AUTOROLE, guild_branch(interaction.guild))
+    all_a, _ = await gh_read(session, FILE_AUTOROLE, guild_branch_from_id(guild_id))
     if not all_a:
         return {}
     return all_a.get(guild_id, {})
 
 async def save_autorole(session, guild_id: str, data: dict):
-    all_a, sha = await gh_read(session, FILE_AUTOROLE, guild_branch(interaction.guild))
+    all_a, sha = await gh_read(session, FILE_AUTOROLE, guild_branch_from_id(guild_id))
     if not all_a:
         all_a = {}
     all_a[guild_id] = data
-    await gh_write(session, FILE_AUTOROLE, all_a, sha, "Vortex: update autorole", guild_branch(interaction.guild))
+    await gh_write(session, FILE_AUTOROLE, all_a, sha, "Vortex: update autorole", guild_branch_from_id(guild_id))
 
 async def get_sticky_roles(session, guild_id: str) -> dict:
-    all_s, _ = await gh_read(session, FILE_STICKYROLES, guild_branch(interaction.guild))
+    all_s, _ = await gh_read(session, FILE_STICKYROLES, guild_branch_from_id(guild_id))
     if not all_s:
         return {}
     return all_s.get(guild_id, {})
 
 async def save_sticky_roles(session, guild_id: str, data: dict):
-    all_s, sha = await gh_read(session, FILE_STICKYROLES, guild_branch(interaction.guild))
+    all_s, sha = await gh_read(session, FILE_STICKYROLES, guild_branch_from_id(guild_id))
     if not all_s:
         all_s = {}
     all_s[guild_id] = data
-    await gh_write(session, FILE_STICKYROLES, all_s, sha, "Vortex: update sticky roles", guild_branch(interaction.guild))
+    await gh_write(session, FILE_STICKYROLES, all_s, sha, "Vortex: update sticky roles", guild_branch_from_id(guild_id))
 
 async def get_starboard(session, guild_id: str) -> dict:
-    all_s, _ = await gh_read(session, FILE_STARBOARD, guild_branch(interaction.guild))
+    all_s, _ = await gh_read(session, FILE_STARBOARD, guild_branch_from_id(guild_id))
     if not all_s:
         return {}
     return all_s.get(guild_id, {})
 
 async def save_starboard(session, guild_id: str, data: dict):
-    all_s, sha = await gh_read(session, FILE_STARBOARD, guild_branch(interaction.guild))
+    all_s, sha = await gh_read(session, FILE_STARBOARD, guild_branch_from_id(guild_id))
     if not all_s:
         all_s = {}
     all_s[guild_id] = data
-    await gh_write(session, FILE_STARBOARD, all_s, sha, "Vortex: update starboard", guild_branch(interaction.guild))
+    await gh_write(session, FILE_STARBOARD, all_s, sha, "Vortex: update starboard", guild_branch_from_id(guild_id))
 
 async def get_birthdays(session, guild_id: str) -> dict:
-    all_b, _ = await gh_read(session, FILE_BIRTHDAYS, guild_branch(interaction.guild))
+    all_b, _ = await gh_read(session, FILE_BIRTHDAYS, guild_branch_from_id(guild_id))
     if not all_b:
         return {}
     return all_b.get(guild_id, {})
 
 async def save_birthdays(session, guild_id: str, data: dict):
-    all_b, sha = await gh_read(session, FILE_BIRTHDAYS, guild_branch(interaction.guild))
+    all_b, sha = await gh_read(session, FILE_BIRTHDAYS, guild_branch_from_id(guild_id))
     if not all_b:
         all_b = {}
     all_b[guild_id] = data
-    await gh_write(session, FILE_BIRTHDAYS, all_b, sha, "Vortex: update birthdays", guild_branch(interaction.guild))
+    await gh_write(session, FILE_BIRTHDAYS, all_b, sha, "Vortex: update birthdays", guild_branch_from_id(guild_id))
 
 
 @bot.tree.command(name="autorole", description="Configure auto-role on join")
@@ -4526,410 +4422,6 @@ async def autorole_cmd(interaction: discord.Interaction, role: discord.Role, ena
     
     status = "enabled" if enabled else "disabled"
     await interaction.followup.send(f"✅ Autorole {status}: {role.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="autorole_bots", description="Configure auto-role for bots")
-@app_commands.describe(role="Role to assign to bots")
-@is_admin()
-async def autorole_bots(interaction: discord.Interaction, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        ar = await get_autorole(session, guild_id)
-        ar["bot_role_id"] = str(role.id)
-        await save_autorole(session, guild_id, ar)
-    
-    await interaction.followup.send(f"✅ Bot autorole set: {role.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="autorole_delay", description="Set delay before autorole assignment")
-@app_commands.describe(seconds="Delay in seconds")
-@is_admin()
-async def autorole_delay(interaction: discord.Interaction, seconds: int):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        ar = await get_autorole(session, guild_id)
-        ar["delay"] = seconds
-        await save_autorole(session, guild_id, ar)
-    
-    await interaction.followup.send(f"✅ Autorole delay set to **{seconds}** seconds", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STICKY ROLES (RE-ADD ON REJOIN)
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="stickyroles", description="Enable/disable sticky roles")
-@app_commands.describe(enabled="Enable sticky roles")
-@is_admin()
-async def stickyroles_cmd(interaction: discord.Interaction, enabled: bool):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        cfg["sticky_roles"] = enabled
-        await save_config(session, guild, cfg)
-    
-    status = "enabled" if enabled else "disabled"
-    await interaction.followup.send(f"✅ Sticky roles {status}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STARBOARD SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="starboard_setup", description="Set up starboard channel")
-@app_commands.describe(channel="Channel for starboard", emoji="Emoji to track (default: ⭐)", threshold="Star count threshold")
-@is_admin()
-async def starboard_setup(interaction: discord.Interaction, channel: discord.TextChannel, emoji: str = "⭐", threshold: int = 3):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        sb = await get_starboard(session, guild_id)
-        sb["channel_id"] = str(channel.id)
-        sb["emoji"] = emoji
-        sb["threshold"] = threshold
-        sb["enabled"] = True
-        sb["starred"] = {}
-        await save_starboard(session, guild_id, sb)
-    
-    await interaction.followup.send(f"✅ Starboard set up in {channel.mention} with {emoji} (threshold: {threshold})", ephemeral=True)
-
-
-@bot.tree.command(name="starboard_disable", description="Disable starboard")
-@is_admin()
-async def starboard_disable(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        sb = await get_starboard(session, guild_id)
-        sb["enabled"] = False
-        await save_starboard(session, guild_id, sb)
-    
-    await interaction.followup.send("✅ Starboard disabled", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DEAD BAN (MASS BAN NEW/UNVERIFIED ACCOUNTS)
-# ═════════════════════════════════════════════════════════════__══════════════════════════════════════════════════
-
-@bot.tree.command(name="deadban", description="Mass ban new/unverified accounts")
-@app_commands.describe(
-    max_age_hours="Max account age in hours",
-    require_avatar="Require avatar to be safe",
-    reason="Ban reason"
-)
-@is_admin()
-async def deadban_cmd(interaction: discord.Interaction, max_age_hours: int = 24, require_avatar: bool = True, reason: str = "Dead ban - new account"):
-    await interaction.response.defer(ephemeral=True)
-    
-    now = datetime.datetime.utcnow()
-    banned_count = 0
-    skipped_count = 0
-    
-    for member in interaction.guild.members:
-        if member.bot or member.guild_permissions.administrator:
-            skipped_count += 1
-            continue
-        
-        age_hours = (now - member.created_at.replace(tzinfo=None)).total_seconds() / 3600
-        
-        if age_hours < max_age_hours:
-            if require_avatar and member.avatar:
-                skipped_count += 1
-                continue
-            
-            try:
-                await member.ban(reason=reason)
-                banned_count += 1
-            except:
-                pass
-    
-    await interaction.followup.send(f"🔨 Dead ban complete:\n**Banned:** {banned_count}\n**Skipped:** {skipped_count}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BIRTHDAY SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="birthday", description="Set your birthday")
-@app_commands.describe(day="Day (1-31)", month="Month (1-12)")
-async def birthday_set(interaction: discord.Interaction, day: int, month: int):
-    await interaction.response.defer(ephemeral=True)
-    
-    if day < 1 or day > 31 or month < 1 or month > 12:
-        await interaction.followup.send("❌ Invalid date. Use day 1-31 and month 1-12", ephemeral=True)
-        return
-    
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        birthdays = await get_birthdays(session, guild_id)
-        birthdays[str(interaction.user.id)] = {
-            "day": day,
-            "month": month,
-            "year": None,
-        }
-        await save_birthdays(session, guild_id, birthdays)
-    
-    await interaction.followup.send(f"🎂 Birthday set: **{day}/{month}**", ephemeral=True)
-
-
-@bot.tree.command(name="birthday_remove", description="Remove your birthday")
-async def birthday_remove(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        birthdays = await get_birthdays(session, guild_id)
-        if str(interaction.user.id) in birthdays:
-            del birthdays[str(interaction.user.id)]
-            await save_birthdays(session, guild_id, birthdays)
-            await interaction.followup.send("✅ Birthday removed", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ No birthday set", ephemeral=True)
-
-
-@bot.tree.command(name="birthday_role", description="Set birthday announcement role")
-@app_commands.describe(role="Role to assign on birthday")
-@is_admin()
-async def birthday_role(interaction: discord.Interaction, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        birthdays = await get_birthdays(session, guild_id)
-        birthdays["birthday_role"] = str(role.id)
-        await save_birthdays(session, guild_id, birthdays)
-    
-    await interaction.followup.send(f"✅ Birthday role set: {role.mention}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# AUTO-PUBLISH ANNOUNCEMENTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="autopublish", description="Enable auto-publish in announcement channels")
-@app_commands.describe(channel="Announcement channel", enabled="Enable or disable")
-@is_admin()
-async def autopublish_cmd(interaction: discord.Interaction, channel: discord.TextChannel, enabled: bool = True):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    if not channel.is_news():
-        await interaction.followup.send("❌ Channel must be an announcement channel.", ephemeral=True)
-        return
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        if "autopublish" not in cfg:
-            cfg["autopublish"] = {}
-        cfg["autopublish"][str(channel.id)] = enabled
-        await save_config(session, guild, cfg)
-    
-    status = "enabled" if enabled else "disabled"
-    await interaction.followup.send(f"✅ Auto-publish {status} in {channel.mention}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ROLE REWARDS FOR LEVELING
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="levelrole", description="Add a role reward for a level")
-@app_commands.describe(level="Level to reward at", role="Role to give")
-@is_admin()
-async def levelrole_add(interaction: discord.Interaction, level: int, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        if "level_roles" not in cfg:
-            cfg["level_roles"] = {}
-        cfg["level_roles"][str(level)] = str(role.id)
-        await save_config(session, guild, cfg)
-    
-    await interaction.followup.send(f"✅ Level **{level}** will now reward {role.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="levelrole_remove", description="Remove a level role reward")
-@app_commands.describe(level="Level to remove reward from")
-@is_admin()
-async def levelrole_remove(interaction: discord.Interaction, level: int):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        if "level_roles" in cfg and str(level) in cfg["level_roles"]:
-            del cfg["level_roles"][str(level)]
-            await save_config(session, guild, cfg)
-            await interaction.followup.send(f"✅ Removed level **{level}** reward", ephemeral=True)
-        else:
-            await interaction.followup.send(f"❌ No reward set for level {level}", ephemeral=True)
-
-
-@bot.tree.command(name="levelrole_list", description="List all level role rewards")
-async def levelrole_list(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-    
-    level_roles = cfg.get("level_roles", {})
-    
-    e = discord.Embed(title="🏆 Level Role Rewards", color=0xFFD700)
-    
-    if not level_roles:
-        e.description = "No level rewards configured."
-    else:
-        for level, role_id in sorted(level_roles.items(), key=lambda x: int(x[0])):
-            role = interaction.guild.get_role(int(role_id))
-            role_text = role.mention if role else f"Unknown role ({role_id})"
-            e.add_field(name=f"Level {level}", value=role_text, inline=True)
-    
-    await interaction.followup.send(embed=e, ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TEMPWARN COMMAND
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="tempwarn", description="Issue a temporary warning")
-@app_commands.describe(member="Member to warn", duration="Duration (e.g., 1h, 1d)", reason="Reason")
-@is_mod()
-async def tempwarn_cmd(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason"):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not can_punish(interaction.user, member):
-        await interaction.followup.send("❌ You cannot warn this user (role hierarchy).", ephemeral=True)
-        return
-    
-    td = parse_duration(duration)
-    if td is None:
-        await interaction.followup.send("❌ Invalid duration.", ephemeral=True)
-        return
-    
-    guild_id = str(interaction.guild_id)
-    expire_time = discord.utils.utcnow() + td
-    
-    async with aiohttp.ClientSession() as session:
-        warnings = await get_warnings(session, guild)
-        uid = str(member.id)
-        if uid not in warnings:
-            warnings[uid] = []
-        
-        warn_data = {
-            "reason": reason,
-            "mod": str(interaction.user),
-            "mod_id": str(interaction.user.id),
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "expires": expire_time.isoformat(),
-            "temporary": True,
-        }
-        warnings[uid].append(warn_data)
-        await save_warnings(session, guild, warnings)
-        
-        # Schedule warning removal
-        temp_data = await get_temp_actions(session)
-        if guild_id not in temp_data:
-            temp_data[guild_id] = []
-        temp_data[guild_id].append({
-            "type": "removewarn",
-            "user_id": str(member.id),
-            "guild_id": guild_id,
-            "end_time": expire_time.isoformat(),
-            "warn_index": len(warnings[uid]) - 1,
-        })
-        await save_temp_actions(session, temp_data)
-    
-    try:
-        await member.send(f"⚠️ You have been temporarily warned in **{interaction.guild.name}**.\nReason: {reason}\nExpires in: {format_timedelta(td)}")
-    except:
-        pass
-    
-    await interaction.followup.send(f"⚠️ Temp-warned **{member}** for {format_timedelta(td)}\nReason: {reason}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# WARNINGS TRANSFER
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="transferwarns", description="Transfer warnings from one user to another")
-@app_commands.describe(from_user="Source user", to_user="Target user")
-@is_admin()
-async def transferwarns_cmd(interaction: discord.Interaction, from_user: discord.Member, to_user: discord.Member):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        warnings = await get_warnings(session, guild)
-        
-        from_warns = warnings.get(str(from_user.id), [])
-        if not from_warns:
-            await interaction.followup.send(f"❌ {from_user} has no warnings to transfer.", ephemeral=True)
-            return
-        
-        # Transfer warnings
-        if str(to_user.id) not in warnings:
-            warnings[str(to_user.id)] = []
-        warnings[str(to_user.id)].extend(from_warns)
-        warnings[str(from_user.id)] = []
-        await save_warnings(session, guild, warnings)
-    
-    await interaction.followup.send(f"✅ Transferred **{len(from_warns)}** warnings from {from_user} to {to_user}", ephemeral=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# POLLS ENHANCED
-# ══════════════════════════════════════════════════════════════════════════════
-
-FILE_POLLS = f"polls.json"
-
-async def get_polls(session, guild_id: str) -> dict:
-    all_p, _ = await gh_read(session, FILE_POLLS, guild_branch(interaction.guild))
-    if not all_p:
-        return {}
-    return all_p.get(guild_id, {})
-
-async def save_polls(session, guild_id: str, polls: dict):
-    all_p, sha = await gh_read(session, FILE_POLLS, guild_branch(interaction.guild))
-    if not all_p:
-        all_p = {}
-    all_p[guild_id] = polls
-    await gh_write(session, FILE_POLLS, all_p, sha, "Vortex: update polls", guild_branch(interaction.guild))
-
-
-@bot.tree.command(name="poll_end", description="End a poll and show results")
-@app_commands.describe(message_id="Message ID of the poll")
-@is_mod()
-async def poll_end(interaction: discord.Interaction, message_id: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    try:
-        msg = await interaction.channel.fetch_message(int(message_id))
-    except:
-        await interaction.followup.send("❌ Message not found", ephemeral=True)
-        return
-    
-    # Count reactions
-    results = []
-    for reaction in msg.reactions:
-        count = reaction.count - 1  # Subtract bot's reaction
-        results.append(f"{reaction.emoji}: **{count}** votes")
-    
-    e = discord.Embed(title="📊 Poll Results", color=0x5865F2)
-    e.description = "\n".join(results)
-    e.add_field(name="Total Votes", value=str(sum(r.count - 1 for r in msg.reactions)))
-    
-    await interaction.followup.send(embed=e)
 
 
 @bot.tree.command(name="vote", description="Quick yes/no vote")
@@ -4958,7 +4450,7 @@ class VerificationView(discord.ui.View):
         guild_id = str(interaction.guild_id)
         
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, guild)
+            cfg = await get_config(session, interaction.guild)
         
         verified_role_id = cfg.get("verified_role")
         if not verified_role_id:
@@ -4978,27 +4470,6 @@ class VerificationView(discord.ui.View):
         await interaction.response.send_message(f"✅ You have been verified! {role.mention}", ephemeral=True)
 
 
-@bot.tree.command(name="verify_setup", description="Set up verification system")
-@app_commands.describe(role="Verified role", channel="Channel for verification panel")
-@is_admin()
-async def verify_setup_cmd(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = str(interaction.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
-        cfg["verified_role"] = str(role.id)
-        await save_config(session, guild, cfg)
-    
-    e = discord.Embed(
-        title="✅ Verification",
-        description="Click the button below to verify yourself and gain access to the server.",
-        color=0x57F287,
-    )
-    await channel.send(embed=e, view=VerificationView())
-    await interaction.followup.send(f"✅ Verification panel posted in {channel.mention}", ephemeral=True)
-
-
 @bot.tree.command(name="unverify", description="Remove verification from user")
 @app_commands.describe(member="Member to unverify")
 @is_mod()
@@ -5007,7 +4478,7 @@ async def unverify_cmd(interaction: discord.Interaction, member: discord.Member)
     guild_id = str(interaction.guild_id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, interaction.guild)
     
     verified_role_id = cfg.get("verified_role")
     if verified_role_id:
@@ -5058,7 +4529,7 @@ async def on_member_join(member: discord.Member):
                     pass
         
         # Sticky roles - restore roles on rejoin
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, member.guild)
         if cfg.get("sticky_roles"):
             sticky = await get_sticky_roles(session, guild_id)
             if str(member.id) in sticky:
@@ -5077,7 +4548,7 @@ async def on_member_remove(member: discord.Member):
     guild_id = str(member.guild.id)
     
     async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, guild)
+        cfg = await get_config(session, member.guild)
         
         if cfg.get("sticky_roles"):
             sticky = await get_sticky_roles(session, guild_id)
@@ -5202,7 +4673,7 @@ async def on_message(message: discord.Message):
         guild_id = str(message.guild.id)
         
         async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, guild)
+            cfg = await get_config(session, message.guild)
         
         autopublish = cfg.get("autopublish", {})
         if autopublish.get(str(message.channel.id)) and message.channel.is_news():
@@ -5222,7 +4693,7 @@ async def on_message(message: discord.Message):
 # Update the leveling system to include role rewards
 async def check_level_roles(member: discord.Member, level: int, session):
     guild_id = str(member.guild.id)
-    cfg = await get_config(session, guild)
+    cfg = await get_config(session, member.guild)
     level_roles = cfg.get("level_roles", {})
     
     # Check all level thresholds up to current level
