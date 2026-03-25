@@ -544,12 +544,53 @@ async def on_member_join(member: discord.Member):
         e.add_field(name="Account created", value=f"<t:{int(member.created_at.timestamp())}:R>", inline=False)
         await send_mod_log(member.guild, cfg, e)
 
+    async with aiohttp.ClientSession() as session:
+        # Autorole
+        ar = await get_autorole(session, guild_id)
+        if ar.get("enabled") and ar.get("role_id"):
+            role = member.guild.get_role(int(ar["role_id"]))
+            if role:
+                delay = ar.get("delay", 0)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    await member.add_roles(role, reason="Autorole")
+                except:
+                    pass
+
+        # Bot autorole
+        if member.bot and ar.get("bot_role_id"):
+            bot_role = member.guild.get_role(int(ar["bot_role_id"]))
+            if bot_role:
+                try:
+                    await member.add_roles(bot_role, reason="Bot autorole")
+                except:
+                    pass
+
+        # Sticky roles - restore roles on rejoin
+        if cfg.get("sticky_roles"):
+            sticky = await get_sticky_roles(session, guild_id)
+            if str(member.id) in sticky:
+                for role_id in sticky[str(member.id)]:
+                    role = member.guild.get_role(int(role_id))
+                    if role:
+                        try:
+                            await member.add_roles(role, reason="Sticky role restore")
+                        except:
+                            pass
+
 
 @bot.event
 async def on_member_remove(member: discord.Member):
     guild_id = str(member.guild.id)
     async with aiohttp.ClientSession() as session:
         cfg = await get_config(session, member.guild)
+
+        if cfg.get("sticky_roles"):
+            sticky = await get_sticky_roles(session, guild_id)
+            sticky[str(member.id)] = [str(r.id) for r in member.roles if r.name != "@everyone" and not r.managed]
+            await save_sticky_roles(session, guild_id, sticky)
+
     if cfg.get("logging", {}).get("member_leave") and cfg.get("mod_log"):
         e = discord.Embed(title="🔴 Member left", color=0xED4245, timestamp=datetime.datetime.utcnow())
         e.set_thumbnail(url=member.display_avatar.url)
@@ -687,6 +728,85 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     member = guild.get_member(payload.user_id)
     if role and member and not member.bot:
         await member.add_roles(role, reason="Reaction role")
+
+    # Starboard handler
+    if not payload.guild_id:
+        return
+
+    guild_id = str(payload.guild_id)
+
+    async with aiohttp.ClientSession() as session:
+        sb = await get_starboard(session, guild_id)
+
+    if not sb.get("enabled"):
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if not channel:
+        return
+
+    try:
+        msg = await channel.fetch_message(payload.message_id)
+    except:
+        return
+
+    star_emoji = sb.get("emoji", "⭐")
+    if str(payload.emoji) != star_emoji:
+        return
+
+    for reaction in msg.reactions:
+        if str(reaction.emoji) == star_emoji:
+            count = reaction.count
+            break
+    else:
+        return
+
+    threshold = sb.get("threshold", 3)
+    if count < threshold:
+        return
+
+    starred = sb.get("starred", {})
+    if str(payload.message_id) in starred:
+        star_ch = bot.get_channel(int(sb["channel_id"]))
+        if star_ch:
+            try:
+                star_msg = await star_ch.fetch_message(int(starred[str(payload.message_id)]))
+                e = discord.Embed(
+                    title=f"⭐ {count} | {msg.channel.name}",
+                    description=msg.content[:1500],
+                    color=0xFFD700,
+                    timestamp=msg.created_at,
+                )
+                e.set_author(name=str(msg.author), icon_url=msg.author.display_avatar.url)
+                e.add_field(name="Source", value=f"[Jump]({msg.jump_url})", inline=False)
+                await star_msg.edit(embed=e)
+            except:
+                pass
+        return
+
+    star_ch = bot.get_channel(int(sb["channel_id"]))
+    if not star_ch:
+        return
+
+    e = discord.Embed(
+        title=f"⭐ {count} | {msg.channel.name}",
+        description=msg.content[:1500],
+        color=0xFFD700,
+        timestamp=msg.created_at,
+    )
+    e.set_author(name=str(msg.author), icon_url=msg.author.display_avatar.url)
+    if msg.attachments:
+        e.set_image(url=msg.attachments[0].url)
+    e.add_field(name="Source", value=f"[Jump]({msg.jump_url})", inline=False)
+
+    star_msg = await star_ch.send(embed=e)
+
+    if "starred" not in sb:
+        sb["starred"] = {}
+    sb["starred"][str(payload.message_id)] = str(star_msg.id)
+
+    async with aiohttp.ClientSession() as session:
+        await save_starboard(session, guild_id, sb)
 
 
 @bot.event
@@ -864,12 +984,15 @@ async def on_message(message: discord.Message):
     elif am.get("zalgo", {}).get("enabled") and contains_zalgo(content):
         await automod_action("delete", "Zalgo text")
 
+    # Auto-publish in announcement channels
+    autopublish = cfg.get("autopublish", {})
+    if autopublish.get(str(message.channel.id)) and message.channel.is_news():
+        try:
+            await message.publish()
+        except:
+            pass
+
     await bot.process_commands(message)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MODERATION COMMANDS - BAN
-# ══════════════════════════════════════════════════════════════════════════════
 
 @bot.tree.command(name="ban", description="Ban a member")
 @app_commands.describe(member="Member to ban", reason="Reason", delete_days="Days of messages to delete (0-7)")
@@ -4449,194 +4572,10 @@ async def unverify_cmd(interaction: discord.Interaction, member: discord.Member)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Update on_member_join to include autorole
-_original_on_member_join = on_member_join.callback
 
-@bot.event
-async def on_member_join(member: discord.Member):
-    # Call original handler
-    await _original_on_member_join(member)
-    
-    guild_id = str(member.guild.id)
-    
-    async with aiohttp.ClientSession() as session:
-        # Autorole
-        ar = await get_autorole(session, guild_id)
-        if ar.get("enabled") and ar.get("role_id"):
-            role = member.guild.get_role(int(ar["role_id"]))
-            if role:
-                delay = ar.get("delay", 0)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                try:
-                    await member.add_roles(role, reason="Autorole")
-                except:
-                    pass
-        
-        # Bot autorole
-        if member.bot and ar.get("bot_role_id"):
-            bot_role = member.guild.get_role(int(ar["bot_role_id"]))
-            if bot_role:
-                try:
-                    await member.add_roles(bot_role, reason="Bot autorole")
-                except:
-                    pass
-        
-        # Sticky roles - restore roles on rejoin
-        cfg = await get_config(session, member.guild)
-        if cfg.get("sticky_roles"):
-            sticky = await get_sticky_roles(session, guild_id)
-            if str(member.id) in sticky:
-                for role_id in sticky[str(member.id)]:
-                    role = member.guild.get_role(int(role_id))
-                    if role:
-                        try:
-                            await member.add_roles(role, reason="Sticky role restore")
-                        except:
-                            pass
 
 
 # Save roles on member leave for sticky roles
-@bot.event
-async def on_member_remove(member: discord.Member):
-    guild_id = str(member.guild.id)
-    
-    async with aiohttp.ClientSession() as session:
-        cfg = await get_config(session, member.guild)
-        
-        if cfg.get("sticky_roles"):
-            sticky = await get_sticky_roles(session, guild_id)
-            # Save non-default roles
-            sticky[str(member.id)] = [str(r.id) for r in member.roles if r.name != "@everyone" and not r.managed]
-            await save_sticky_roles(session, guild_id, sticky)
-        
-        # Original leave logging
-        if cfg.get("logging", {}).get("member_leave") and cfg.get("mod_log"):
-            e = discord.Embed(title="🔴 Member left", color=0xED4245, timestamp=datetime.datetime.utcnow())
-            e.set_thumbnail(url=member.display_avatar.url)
-            e.add_field(name="User", value=f"{member} ({member.id})", inline=False)
-            await send_mod_log(member.guild, cfg, e)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STARBOARD HANDLER
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # Original reaction role handler
-    await _original_reaction_add(payload)
-    
-    if not payload.guild_id:
-        return
-    
-    guild_id = str(payload.guild_id)
-    
-    async with aiohttp.ClientSession() as session:
-        sb = await get_starboard(session, guild_id)
-    
-    if not sb.get("enabled"):
-        return
-    
-    channel = bot.get_channel(payload.channel_id)
-    if not channel:
-        return
-    
-    try:
-        msg = await channel.fetch_message(payload.message_id)
-    except:
-        return
-    
-    # Check if emoji matches
-    star_emoji = sb.get("emoji", "⭐")
-    if str(payload.emoji) != star_emoji:
-        return
-    
-    # Count stars
-    for reaction in msg.reactions:
-        if str(reaction.emoji) == star_emoji:
-            count = reaction.count
-            break
-    else:
-        return
-    
-    threshold = sb.get("threshold", 3)
-    if count < threshold:
-        return
-    
-    # Check if already starred
-    starred = sb.get("starred", {})
-    if str(payload.message_id) in starred:
-        # Update existing starboard message
-        star_ch = bot.get_channel(int(sb["channel_id"]))
-        if star_ch:
-            try:
-                star_msg = await star_ch.fetch_message(int(starred[str(payload.message_id)]))
-                e = discord.Embed(
-                    title=f"⭐ {count} | {msg.channel.name}",
-                    description=msg.content[:1500],
-                    color=0xFFD700,
-                    timestamp=msg.created_at,
-                )
-                e.set_author(name=str(msg.author), icon_url=msg.author.display_avatar.url)
-                e.add_field(name="Source", value=f"[Jump]({msg.jump_url})", inline=False)
-                await star_msg.edit(embed=e)
-            except:
-                pass
-        return
-    
-    # Create new starboard entry
-    star_ch = bot.get_channel(int(sb["channel_id"]))
-    if not star_ch:
-        return
-    
-    e = discord.Embed(
-        title=f"⭐ {count} | {msg.channel.name}",
-        description=msg.content[:1500],
-        color=0xFFD700,
-        timestamp=msg.created_at,
-    )
-    e.set_author(name=str(msg.author), icon_url=msg.author.display_avatar.url)
-    if msg.attachments:
-        e.set_image(url=msg.attachments[0].url)
-    e.add_field(name="Source", value=f"[Jump]({msg.jump_url})", inline=False)
-    
-    star_msg = await star_ch.send(embed=e)
-    
-    # Save to starred
-    if "starred" not in sb:
-        sb["starred"] = {}
-    sb["starred"][str(payload.message_id)] = str(star_msg.id)
-    
-    async with aiohttp.ClientSession() as session:
-        await save_starboard(session, guild_id, sb)
-
-
-# Store original reaction handler
-_original_reaction_add = on_raw_reaction_add.callback
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# AUTO-PUBLISH HANDLER
-# ══════════════════════════════════════════════════════════════════════════════
-
-@bot.event
-async def on_message(message: discord.Message):
-    # Check for auto-publish
-    if message.guild and not message.author.bot:
-        guild_id = str(message.guild.id)
-        
-        async with aiohttp.ClientSession() as session:
-            cfg = await get_config(session, message.guild)
-        
-        autopublish = cfg.get("autopublish", {})
-        if autopublish.get(str(message.channel.id)) and message.channel.is_news():
-            try:
-                await message.publish()
-            except:
-                pass
-    
-    # Call original on_message
-    await bot.process_commands(message)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
