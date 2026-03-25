@@ -4302,10 +4302,10 @@ async def check_scheduled_tasks():
 # AUTOROLE SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
 
-FILE_AUTOROLE = f"{DATA_ROOT}/autorole.json"
-FILE_STARBOARD = f"{DATA_ROOT}/starboard.json"
-FILE_STICKYROLES = f"{DATA_ROOT}/stickyroles.json"
-FILE_BIRTHDAYS = f"{DATA_ROOT}/birthdays.json"
+FILE_AUTOROLE = "autorole.json"
+FILE_STARBOARD = "starboard.json"
+FILE_STICKYROLES = "stickyroles.json"
+FILE_BIRTHDAYS = "birthdays.json"
 
 async def get_autorole(session, guild_id: str) -> dict:
     all_a, _ = await gh_read(session, FILE_AUTOROLE, guild_branch_from_id(guild_id))
